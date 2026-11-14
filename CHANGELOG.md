@@ -31,6 +31,7 @@
 - 不再宣传固定的 1.2 万 token 开销，改为以 CLI 返回的 `usage` 为准。
 - 明知不需要规划的任务不再强制先规划；`hard` 档不再称「长时任务」。
 - 补齐 `LICENSE`、`CHANGELOG`、Windows 安装与排障说明。
+- 补 `author.email`（开放平台专家包必填项）。
 
 ### 体积
 
