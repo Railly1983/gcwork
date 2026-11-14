@@ -1,0 +1,76 @@
+{
+  "name": "gcwork",
+  "version": "2.0.1",
+  "description": "Connects the local Codex and Claude Code to WorkBuddy. Four tiers — plan, hard, main, chore — pick the model and reasoning effort for each task; planning stays read-only and separate from execution.",
+  "author": {
+    "name": "Jike",
+    "email": ""
+  },
+  "agents": [
+    "./agents/gcwork.md"
+  ],
+  "skills": [
+    "./skills/gcwork-dispatch"
+  ],
+  "expertType": "agent",
+  "agentName": "gcwork",
+  "displayName": {
+    "en": "Jike",
+    "zh": "吉克搬砖"
+  },
+  "profession": {
+    "en": "Codex/Claude Collaboration Specialist",
+    "zh": "Codex/Claude协作专家"
+  },
+  "displayDescription": {
+    "en": "Plugs your local Codex and Claude Code in. Four tiers pick the model; you just talk.",
+    "zh": "接入本机 Codex 与 Claude Code，四档调度自动选模型，对话即可调用。"
+  },
+  "avatar": "avatars/expert.png",
+  "categoryId": "02-Engineering",
+  "license": "MIT",
+  "keywords": [
+    "codex",
+    "claude-code",
+    "local-cli",
+    "model-routing",
+    "coding-agent"
+  ],
+  "homepage": {
+    "type": "github",
+    "url": ""
+  },
+  "defaultInitPrompt": {
+    "zh": "先判断这个任务的复杂度：简单的直接干；复杂或高风险的话，先给我方案，我确认后再改代码。",
+    "en": "Judge the complexity first: just do it if it's simple; if it's complex or risky, show me the plan before touching code."
+  },
+  "plugin": "gcwork",
+  "tags": [
+    {
+      "en": "Codex",
+      "zh": "Codex"
+    },
+    {
+      "en": "Claude Code",
+      "zh": "Claude Code"
+    },
+    {
+      "en": "Model routing",
+      "zh": "模型调度"
+    }
+  ],
+  "quickPrompts": [
+    {
+      "zh": "先判断这个任务的复杂度：简单的直接干；复杂或高风险的话，先给我方案，我确认后再改代码。",
+      "en": "Judge the complexity first: just do it if it's simple; if it's complex or risky, show me the plan before touching code."
+    },
+    {
+      "zh": "这个问题比较棘手，用攻坚档定位根因，给出最小修复并跑相关测试。",
+      "en": "This one is tricky — use the hard tier to find the root cause, apply the smallest fix, and run the relevant tests."
+    },
+    {
+      "zh": "这是个小活，用杂活档处理，只改必要的文件，把验证结果告诉我。",
+      "en": "Small job — use the chore tier, touch only the files that must change, and tell me how you verified it."
+    }
+  ]
+}
