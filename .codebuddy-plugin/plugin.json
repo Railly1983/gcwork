@@ -38,7 +38,7 @@
   ],
   "homepage": {
     "type": "github",
-    "url": ""
+    "url": "https://github.com/Railly1983/gcwork"
   },
   "defaultInitPrompt": {
     "zh": "先判断这个任务的复杂度：简单的直接干；复杂或高风险的话，先给我方案，我确认后再改代码。",

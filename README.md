@@ -73,6 +73,16 @@ node "$GCROOT/skills/gcwork-dispatch/scripts/dispatch.mjs" --check
 
 **常见问题**：`claude` 或 `codex` 命令找不到，说明装了但不在 PATH。Windows 下 npm 全局装的通常在 `%APPDATA%\npm\`，本地安装的在 `%LOCALAPPDATA%\Programs\`。脚本自己会去这几个位置找，`--check` 显示 `installed: false` 才需要处理。
 
+## 安装
+
+把 `gcwork/` 整个目录放到本地市场：
+
+```
+~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/
+```
+
+也可以从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.0.1.zip`，解压后放到同一位置。放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。
+
 ## 成本
 
 每次启动外部 CLI 都有初始化上下文开销，实际消耗以 CLI 返回的 `usage` 为准，跟任务大小关系不大。
@@ -91,7 +101,7 @@ agents/gcwork.md                专家本体：四档、派单流程、验收、
 skills/gcwork-dispatch/
   SKILL.md                      派单手册
   scripts/dispatch.mjs          派单脚本（零依赖、无状态、可单测）
-tests/dispatch.test.mjs         43 项单元测试（node --test，不烧额度）
+tests/dispatch.test.mjs         44 项单元测试（node --test，不烧额度）
 avatars/expert.png              专家头像
 LICENSE / CHANGELOG.md
 ```
