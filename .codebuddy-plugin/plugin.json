@@ -4,7 +4,7 @@
   "description": "Connects the local Codex and Claude Code to WorkBuddy. Four tiers — plan, hard, main, chore — pick the model and reasoning effort for each task; planning stays read-only and separate from execution.",
   "author": {
     "name": "Jike",
-    "email": ""
+    "email": "30673448@qq.com"
   },
   "agents": [
     "./agents/gcwork.md"
