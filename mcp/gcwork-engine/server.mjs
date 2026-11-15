@@ -16,33 +16,44 @@ function send(obj) {
   process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-let buf = '';
+// 用 Buffer 累积：Content-Length 是字节数，在字符串上切会把多字节中文切坏。
+let buf = Buffer.alloc(0);
+const HEADER_END = Buffer.from('\r\n\r\n');
 
 // 输入解析：优先识别 Content-Length 帧；否则按行切分逐行 JSON。
 // 标准 MCP 客户端发的是逐行 JSON，必须支持，否则握手无响应。
 function extractMessages() {
   const out = [];
   while (true) {
-    // 跳过前导空白/换行
-    buf = buf.replace(/^[\r\n]+/, '');
-    if (!buf) break;
+    // 跳过前导 \r \n
+    let skip = 0;
+    while (skip < buf.length && (buf[skip] === 0x0a || buf[skip] === 0x0d)) skip += 1;
+    if (skip) buf = buf.subarray(skip);
+    if (!buf.length) break;
 
-    const headerMatch = /^Content-Length:\s*(\d+)\r?\n\r?\n/i.exec(buf);
-    if (headerMatch) {
+    // 头部是否已经收全（只有确认收到 \r\n\r\n 才解析，避免头分片时误判）
+    const headerIdx = buf.indexOf(HEADER_END);
+    const headerText = headerIdx === -1 ? buf.toString('utf8') : buf.subarray(0, headerIdx).toString('utf8');
+    const headerMatch = /^Content-Length:\s*(\d+)\s*$/im.exec(headerText);
+
+    if (headerMatch && headerIdx !== -1) {
       const len = Number(headerMatch[1]);
-      const start = headerMatch[0].length;
-      if (buf.length < start + len) break; // 还不完整
-      const body = buf.slice(start, start + len);
-      buf = buf.slice(start + len);
+      const start = headerIdx + HEADER_END.length;
+      if (buf.length < start + len) break; // 消息体还不完整
+      const body = buf.subarray(start, start + len).toString('utf8');
+      buf = buf.subarray(start + len);
       try { out.push(JSON.parse(body)); } catch { /* 坏帧跳过 */ }
       continue;
     }
 
-    // 逐行 JSON：找第一个换行
-    const nl = buf.indexOf('\n');
+    // 头看起来像 Content-Length 但还没收全 → 等下一批数据
+    if (/^Content-Length:/i.test(headerText) && headerIdx === -1) break;
+
+    // 逐行 JSON：按字节找 \n，再整体解码，避免中文截断
+    const nl = buf.indexOf(0x0a);
     if (nl === -1) break; // 未收到完整行
-    const line = buf.slice(0, nl).trim();
-    buf = buf.slice(nl + 1);
+    const line = buf.subarray(0, nl).toString('utf8').trim();
+    buf = buf.subarray(nl + 1);
     if (!line) continue;
     try { out.push(JSON.parse(line)); } catch { /* 非 JSON 行忽略 */ }
   }
@@ -103,7 +114,7 @@ async function dispatchRpc(msg) {
 // ---------------------------------------------------------------- stdin 循环
 let recovered = false;
 function onData(chunk) {
-  buf += chunk.toString('utf8');
+  buf = Buffer.concat([buf, chunk]);
   if (!recovered) { recovered = true; try { recoverOrphans(); } catch { /* 忽略 */ } }
   const messages = extractMessages();
   for (const m of messages) {

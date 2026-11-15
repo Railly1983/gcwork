@@ -65,6 +65,29 @@ export function verify(ref) {
     reasons.push(`触碰敏感文件（锁文件/CI/依赖/密钥），需人工复核：${sensitiveFiles.join(', ')}`);
   }
 
+  // 任务没成功跑完时直接返回，不再跑 npm test ——
+  // 结果已定是 rejected，再花五分钟跑测试没有意义，还白占机器。
+  if (jobStatus !== 'ok') {
+    return {
+      ok: true,
+      job_id: job.job_id,
+      task_id: job.task_id,
+      jobStatus,
+      accepted: false,
+      rejected: true,
+      needsHuman: false,
+      scopeOk,
+      testsRan: false,
+      testsPassed: null,
+      changedFiles,
+      changedStats: delta ? delta.stats : null,
+      sensitiveFiles,
+      reasons,
+      gitRepo: after !== null,
+      gitWarning: job.git_warning || null,
+    };
+  }
+
   // 测试：仅在存在 test 脚本时跑；否则降级为 needsHuman，不硬判失败。
   let testsPassed = null;
   let testRan = false;

@@ -1,7 +1,7 @@
 // gcwork-engine 单元测试 + e2e（fake CLI）。运行：node --test tests/engine.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, rmSync, readFileSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -339,18 +339,73 @@ test('BUG2 回归：显式 model + reviewer 默认只读（不会被 sol 悄悄�
   assert.equal(t3.sandbox, 'read-only');
 });
 
-test('BUG3 回归：超时 job 在 status() 惰性判定为 timeout', () => {
+test('BUG3 回归：进程仍存活 + 已超时 → 惰性判 timeout', async () => {
   setupEnv();
   const wd = makeGitWorkdir();
   const after = gitSnapshot(wd);
-  const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2 小时前
+  // 起一个真实存活的长睡眠进程当替身
+  const { spawn } = await import('node:child_process');
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},600000)'], { stdio: 'ignore' });
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   ledger.putJob({
-    job_id: 'stale-running', task_id: 'task-stale', workdir: wd, status: 'running',
-    pid: null, startedAt: old, timeoutSec: 60, runDir: mkdtempSync(join(tmpdir(), 'gcw-run-')),
+    job_id: 'stale-alive', task_id: 'task-alive', workdir: wd, status: 'running',
+    pid: sleeper.pid, startedAt: old, timeoutSec: 60,
+    runDir: mkdtempSync(join(tmpdir(), 'gcw-run-')),
     before_snapshot: snapshotToJSON(after),
   });
-  const r = dispatch.status('stale-running');
-  assert.equal(r.status, 'timeout', '超时的 running job 应被惰性判为 timeout');
+  const r = dispatch.status('stale-alive');
+  assert.equal(r.status, 'timeout', '存活进程超时后应判 timeout');
+  try { sleeper.kill(); } catch {}
+});
+
+test('BUG3b 回归：进程已结束但查询得晚，不能被误判 timeout', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  // 模拟：任务早已跑完，产物齐全，只是很久之后才来查询
+  writeFileSync(join(runDir, 'stdout.log'),
+    '{"type":"turn.completed","message":"做完了"}\n');
+  // 真实场景：2 小时前启动，30 秒就跑完了，之后一直没人查。
+  // 产物 mtime 必须是「完成时刻」而不是「现在」，否则会被误判成超期完成。
+  const startedMs = Date.now() - 2 * 60 * 60 * 1000;
+  const finishedMs = startedMs + 30_000;
+  utimesSync(join(runDir, 'stdout.log'), new Date(finishedMs), new Date(finishedMs));
+  ledger.putJob({
+    job_id: 'done-late-query', task_id: 'task-late', workdir: wd, status: 'running',
+    pid: 999999, startedAt: new Date(startedMs).toISOString(), timeoutSec: 60, runDir, executor: 'codex',
+    before_snapshot: snapshotToJSON(after),
+  });
+  const r = dispatch.status('done-late-query');
+  assert.notEqual(r.status, 'timeout', '按时完成的任务不能因查询得晚被判超时');
+  assert.equal(r.status, 'ok', '有产物应按 ok 收尾');
+});
+
+test('BUG3c 回归：子进程杀不掉时写锁不释放', async () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const { spawn } = await import('node:child_process');
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},600000)'], { stdio: 'ignore' });
+  const { createHash } = await import('node:crypto');
+  const { mkdirSync: mk } = await import('node:fs');
+  const home = process.env.GCWORK_HOME;
+  const h = createHash('sha1').update(wd.toLowerCase()).digest('hex').slice(0, 16);
+  const lockFile = join(home, 'locks', `${h}.lock`);
+  mk(join(home, 'locks'), { recursive: true });
+  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, jobId: 'undead', cwd: wd, startedAt: new Date().toISOString() }));
+  const job = {
+    job_id: 'undead', task_id: 'task-undead', workdir: wd, status: 'running',
+    pid: sleeper.pid, startedAt: new Date(Date.now() - 3600_000).toISOString(),
+    runDir: mkdtempSync(join(tmpdir(), 'gcw-run-')), lockPath: lockFile,
+    before_snapshot: snapshotToJSON(after),
+  };
+  ledger.putJob(job);
+  // 直接 finalize 一个 pid 仍存活的 job（模拟 kill 失败）
+  const out = dispatch.finalize(job);
+  assert.equal(out.lockHeld, true, '进程未死时必须保留锁');
+  assert.ok(existsSync(lockFile), '锁文件应仍在');
+  try { sleeper.kill(); } catch {}
 });
 
 test('BUG4 回归：存活 job 的写锁超 15 分钟也不被抢', async () => {
@@ -396,6 +451,76 @@ test('BUG5 回归：标准 MCP 客户端（逐行 JSON）能握手', async () =>
   assert.ok(lines.length >= 1, '标准客户端应收到响应（逐行 JSON）');
   const resp = JSON.parse(lines[0]);
   assert.equal(resp.id, 1);
+  assert.equal(resp.result.serverInfo.name, 'gcwork-engine');
+});
+
+test('BUG-A 回归：任务非 ok 时 verify 不再跑 npm test', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  // 放一个会写标记的 test 脚本，若被执行就能看出来
+  writeFileSync(join(wd, 'package.json'), JSON.stringify({
+    name: 'x', version: '1.0.0',
+    scripts: { test: 'node -e "require(\'fs\').writeFileSync(\'ran_test\',\'1\')"' },
+  }));
+  const after = gitSnapshot(wd);
+  ledger.putJob({
+    job_id: 'failed-with-test', task_id: 'tf', workdir: wd, status: 'failed',
+    pid: null, startedAt: new Date().toISOString(), before_snapshot: snapshotToJSON(after),
+  });
+  const r = verifyJob('failed-with-test');
+  assert.equal(r.rejected, true);
+  assert.equal(r.testsRan, false, '非 ok 任务不应执行测试脚本');
+  assert.ok(!existsSync(join(wd, 'ran_test')), '测试脚本不应被执行');
+});
+
+test('BUG-B 回归：超期完成（产物晚于期限写入）判 timeout，不判 ok', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  writeFileSync(join(runDir, 'stdout.log'), '{"type":"turn.completed","message":"超期才做完"}\n');
+  // 把产物 mtime 改成 2 小时前，startedAt 设为 2.5 小时前，timeoutSec=60 → 超期完成
+  const outPath = join(runDir, 'stdout.log');
+  const started = Date.now() - 9000_000;   // 150 分钟前启动
+  const finished = Date.now() - 7200_000;  // 120 分钟前写完
+  utimesSync(outPath, new Date(finished), new Date(finished));
+  ledger.putJob({
+    job_id: 'late-finish', task_id: 'tlf', workdir: wd, status: 'running',
+    pid: 999999, executor: 'codex', startedAt: new Date(started).toISOString(),
+    timeoutSec: 60, runDir, before_snapshot: snapshotToJSON(after),
+  });
+  const r = dispatch.status('late-finish');
+  assert.equal(r.status, 'timeout', '超期完成的任务应判 timeout，不能当 ok');
+});
+
+test('BUG5b 回归：Content-Length 帧 + 中文 + 分片 都能正确解析', async () => {
+  const { spawn } = await import('node:child_process');
+  const server = resolve(join(import.meta.dirname, '..', 'server.mjs'));
+  const p = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d) => { out += d.toString(); });
+
+  const body = JSON.stringify({
+    jsonrpc: '2.0', id: 7, method: 'initialize',
+    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: '中文客户端', version: '1' } },
+  });
+  const buf = Buffer.from(body, 'utf8');
+  const frame = Buffer.concat([
+    Buffer.from(`Content-Length: ${buf.length}\r\n\r\n`, 'utf8'),
+    buf,
+  ]);
+  // 故意从中间切开，模拟 TCP 分片（切在多字节中文中间也无所谓，靠字节长度还原）
+  const cut = Math.floor(frame.length / 2);
+  p.stdin.write(frame.subarray(0, cut));
+  await new Promise((r) => setTimeout(r, 120));
+  p.stdin.write(frame.subarray(cut));
+  await new Promise((r) => setTimeout(r, 900));
+  p.kill();
+
+  const lines = out.split('\n').filter(Boolean);
+  assert.ok(lines.length >= 1, '分片 + 中文帧应能解析并响应');
+  const resp = JSON.parse(lines[0]);
+  assert.equal(resp.id, 7);
   assert.equal(resp.result.serverInfo.name, 'gcwork-engine');
 });
 

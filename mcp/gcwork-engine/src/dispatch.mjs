@@ -96,9 +96,12 @@ function acquireLock(cwd, force) {
       if (!holder) {
         stale = true;
       } else if (held) {
-        // 任务还记着 running 且子进程活着 → 绝不因超时抢锁
+        // 两种情况锁必须保留：
+        // 1) 任务仍 running 且子进程活着；
+        // 2) 收尾时进程没杀掉、显式标了 lockHeld（状态可能是 timeout，但锁必须还在）。
         const stillRunning = held.status === 'running' && held.pid && pidAlive(held.pid);
-        stale = !stillRunning;
+        const undead = held.lockHeld === true && held.pid && pidAlive(held.pid);
+        stale = !(stillRunning || undead);
       } else {
         // 台账里没有对应 job（锁是残留）→ 用 pid + 时间兜底
         const age = holder.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
@@ -114,8 +117,18 @@ function acquireLock(cwd, force) {
   return { ok: false, code: 'busy', detail: '并发锁获取失败，重试后仍被占用' };
 }
 
-function releaseLock(p) {
+/**
+ * 释放写锁。传入 jobId 时校验归属：只有锁文件里记的还是自己才删，
+ * 避免旧任务的 monitor 收尾时误删新任务刚拿到的同路径锁。
+ */
+function releaseLock(p, jobId = null) {
   if (!p) return;
+  if (jobId) {
+    try {
+      const holder = JSON.parse(readFileSync(p, 'utf8'));
+      if (holder && holder.jobId && holder.jobId !== jobId) return; // 锁已易主，不删
+    } catch { /* 读不到就当自己的，继续删 */ }
+  }
   try { rmSync(p, { force: true }); } catch { /* 忽略 */ }
 }
 
@@ -279,18 +292,20 @@ export function finalizeFromJob(jobId) {
   if (!job) return null;
   if (isTerminal(job.status)) return job;
 
-  // 惰性超时判定：即使后台 monitor 被宿主杀掉，只要 status() 被调用，
-  // 就按 startedAt + timeoutSec 判断是否已超时，超时则杀树 + 落标记。
+  // 先看进程死活：已经结束的任务按产物判定，不能因为「查询得晚」就判超时。
+  const alive = Boolean(job.pid && pidAlive(job.pid));
+  if (!alive) return finalize(job);
+
+  // 进程还活着，再看是否超过 timeoutSec → 杀树 + 落超时标记。
   const limit = Number(job.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const elapsedMs = job.startedAt ? Date.now() - Date.parse(job.startedAt) : 0;
   if (elapsedMs >= limit * 1000) {
-    if (job.pid && pidAlive(job.pid)) killJob(job.pid);
-    markTimedOut(job.runDir); // 超时事实成立，无论 pid 是否还活着
+    killJob(job.pid);
+    markTimedOut(job.runDir);
     return finalize(job);
   }
 
-  if (job.pid && pidAlive(job.pid)) return job; // 仍在跑且未超时
-  return finalize(job);
+  return job; // 仍在跑且未超时
 }
 
 /** pid 已死或超时 → 解析产物、定状态、落盘。 */
@@ -319,7 +334,19 @@ export function finalize(job) {
     cliError = r.isError ? String(message || '') : null;
   }
 
-  const timedOut = wasTimedOut(runDir);
+  let timedOut = wasTimedOut(runDir);
+  // monitor 丢失（宿主被杀）时没有超时标记。用产物最后写入时刻推断真实完成时间：
+  // 若从启动到产出结束已超过 timeoutSec，就是超期完成，不能算成功。
+  if (!timedOut && job.startedAt && job.timeoutSec) {
+    const limit = Number(job.timeoutSec) * 1000;
+    const outPath = join(runDir, 'stdout.log');
+    try {
+      const finishedAt = existsSync(outPath) ? statSync(outPath).mtimeMs : null;
+      if (finishedAt && finishedAt - Date.parse(job.startedAt) > limit) {
+        timedOut = true;
+      }
+    } catch { /* 读不到 mtime 就不判 */ }
+  }
   const combined = `${stderr}\n${stdout}`;
   const hasMessage = Boolean(message && message.trim());
 
@@ -393,7 +420,18 @@ export function finalize(job) {
   };
   putJob(updated);
   activeJobs.delete(job.job_id);
-  releaseLock(job.lockPath);
+
+  // 写锁释放条件：只有确认子进程已退出才释放。
+  // 若超时收尾时进程还活着（kill 失败），必须保留锁——否则第二单会进来，同目录并发写。
+  const stillAlive = Boolean(job.pid && pidAlive(job.pid));
+  if (stillAlive) {
+    updated.lockHeld = true;
+    updated.git_warning = [updated.git_warning, '子进程未能终止，写锁保留，勿在相同目录派新写任务']
+      .filter(Boolean).join('；');
+    putJob(updated);
+  } else {
+    releaseLock(job.lockPath, job.job_id); // 带 jobId 校验归属，防误删新任务的锁
+  }
   return updated;
 }
 
