@@ -1,6 +1,6 @@
 // 验收：只看产物（artifacts），不轻信 CLI 自称「已完成」。git 范围审查 + 敏感文件标记 +
 // 跑测试（无 test 脚本则降级为 needsHuman，不硬判失败）。
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveRef } from './engine/ledger.mjs';
@@ -28,7 +28,7 @@ export function isSensitive(p) {
 /**
  * 验收一条 job（按 job_id 或 task_id）。
  */
-export function verify(ref) {
+export async function verify(ref) {
   const job = resolveRef(ref);
   if (!job) return { ok: false, error: 'JOB_NOT_FOUND', ref };
 
@@ -122,7 +122,30 @@ export function verify(ref) {
       const [cmd, args] = npmCli
         ? [process.execPath, [npmCli, 'test']]
         : ['npm', ['test']];
-      const r = spawnSync(cmd, args, { cwd: pkgDir, encoding: 'utf8', timeout: 300_000, windowsHide: true });
+      // 必须异步：spawnSync 会阻塞事件循环，常驻 MCP 进程里其他任务的心跳
+      // 会因此停摆，被判成死任务。测试最长跑 5 分钟，不能堵在这里。
+      const r = await new Promise((resolve) => {
+        const child = spawn(cmd, args, { cwd: pkgDir, windowsHide: true });
+        let done = false;
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          try { child.kill(); } catch { /* 忽略 */ }
+          resolve({ status: null, error: { code: 'TIMEOUT', message: '测试超时 300s' } });
+        }, 300_000);
+        child.on('error', (e) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ status: null, error: { code: e.code || 'SPAWN', message: e.message } });
+        });
+        child.on('close', (code) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          resolve({ status: code, error: null });
+        });
+      });
       testsPassed = r.status === 0;
       if (!testsPassed) {
         accepted = false;

@@ -256,7 +256,7 @@ test('list_jobs / health 返回结构', () => {
 });
 
 // ---------------------------------------------------------------- 回归：外部审计发现的 4 个 bug
-test('BUG1 回归：verify 对 failed/running 任务必须 rejected', () => {
+test('BUG1 回归：verify 对 failed/running 任务必须 rejected', async () => {
   setupEnv();
   const wd = makeGitWorkdir();
   const after = gitSnapshot(wd);
@@ -266,14 +266,14 @@ test('BUG1 回归：verify 对 failed/running 任务必须 rejected', () => {
       workdir: wd, status: badStatus, pid: null,
       before_snapshot: snapshotToJSON(after), startedAt: new Date().toISOString(),
     });
-    const r = verifyJob(`bad-${badStatus}`);
+    const r = await verifyJob(`bad-${badStatus}`);
     assert.equal(r.accepted, false, `${badStatus} 不应验收通过`);
     assert.equal(r.rejected, true, `${badStatus} 应判 rejected`);
     assert.equal(r.jobStatus, badStatus);
   }
 });
 
-test('BUG1 回归：verify 对 ok 任务仍可 accepted', () => {
+test('BUG1 回归：verify 对 ok 任务仍可 accepted', async () => {
   setupEnv();
   const wd = makeGitWorkdir();
   const after = gitSnapshot(wd);
@@ -281,7 +281,7 @@ test('BUG1 回归：verify 对 ok 任务仍可 accepted', () => {
     job_id: 'good-ok', task_id: 'task-ok', workdir: wd, status: 'ok', pid: null,
     before_snapshot: snapshotToJSON(after), startedAt: new Date().toISOString(),
   });
-  const r = verifyJob('good-ok');
+  const r = await verifyJob('good-ok');
   // 无 test 脚本 → needsHuman，但不能被 rejected
   assert.equal(r.rejected, false, 'ok 任务不应被 rejected');
   assert.equal(r.jobStatus, 'ok');
@@ -405,7 +405,7 @@ test('BUG4 回归：存活 job 的写锁超 15 分钟也不被抢', async () => 
   assert.equal(r.status, 'busy', '存活 job 的锁不能被超时抢走');
 });
 
-test('BUG-A 回归：任务非 ok 时 verify 不再跑 npm test', () => {
+test('BUG-A 回归：任务非 ok 时 verify 不再跑 npm test', async () => {
   setupEnv();
   const wd = makeGitWorkdir();
   // 放一个会写标记的 test 脚本，若被执行就能看出来
@@ -418,7 +418,7 @@ test('BUG-A 回归：任务非 ok 时 verify 不再跑 npm test', () => {
     job_id: 'failed-with-test', task_id: 'tf', workdir: wd, status: 'failed',
     pid: null, startedAt: new Date().toISOString(), before_snapshot: snapshotToJSON(after),
   });
-  const r = verifyJob('failed-with-test');
+  const r = await verifyJob('failed-with-test');
   assert.equal(r.rejected, true);
   assert.equal(r.testsRan, false, '非 ok 任务不应执行测试脚本');
   assert.ok(!existsSync(join(wd, 'ran_test')), '测试脚本不应被执行');

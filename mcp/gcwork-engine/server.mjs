@@ -66,7 +66,7 @@ const handlers = {
     return r;
   },
   async verify(args = {}) {
-    const r = verify(args.ref);
+    const r = await verify(args.ref);
     if (!r) throw new Error(`找不到任务：${args.ref}`);
     return r;
   },

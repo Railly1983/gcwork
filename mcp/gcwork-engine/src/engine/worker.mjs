@@ -15,6 +15,7 @@ import { gitSnapshot, gitDelta, snapshotFromJSON, gitDiffText } from './git.mjs'
 import { classifyError } from './errors.mjs';
 import { releaseLock } from './locks.mjs';
 import { buildArgv as claudeArgv, readResult as claudeRead } from '../adapters/claude.mjs';
+import { childEnv } from '../models.mjs';
 
 const FLUSH_MS = 500;
 const MAX_ITEMS = 40;
@@ -60,7 +61,8 @@ export async function runJob(spec) {
       pushItem(`异常：${String((e && e.message) || e).slice(0, 100)}`);
       finish(spec, route, runDir);
     }
-    process.exit(1);
+    // 绝不 process.exit：任务跑在常驻 MCP 进程里，退出会把整个服务和
+    // 其他正在跑的任务一起带走。这里只收尾当前任务，进程继续服务。
   };
   process.on('uncaughtException', onCrash('uncaughtException'));
   process.on('unhandledRejection', onCrash('unhandledRejection'));
@@ -69,6 +71,7 @@ export async function runJob(spec) {
   // 记成 workerPid 会让超时处理误杀整个服务。用心跳时间判活就够了。
   const j0 = getJob(jobId);
   if (j0) putJob({ ...j0, heartbeatAt: new Date().toISOString() });
+  else log('台账里找不到该 job，可能已被清理');
   log(`worker 启动 pid=${process.pid} executor=${executor}`);
 
   const flush = (force = false) => {
@@ -159,9 +162,18 @@ async function runCodex(spec, route, pushItem, flush, startedAt) {
       }
       flush();
     } else if (method === 'turn/completed') {
-      route.status = 'completed';
+      // turn 结束不等于成功：被中断或失败的 turn 也会发 completed，
+      // 不看 status 会把失败判成 ok，用户就会拿到一个假成功。
+      const st = params.turn?.status || params.status || null;
       if (params.usage) route.usage = params.usage;
-      pushItem('执行结束');
+      if (st && st !== 'completed') {
+        route.status = st === 'interrupted' ? 'interrupted' : 'failed';
+        route.error = params.turn?.error?.message || params.error?.message || `turn 状态：${st}`;
+        pushItem(`未成功：${st}`);
+      } else {
+        route.status = 'completed';
+        pushItem('执行结束');
+      }
       flush(true);
     } else if (method === 'turn/failed' || method === 'error') {
       route.status = 'failed';
@@ -175,7 +187,7 @@ async function runCodex(spec, route, pushItem, flush, startedAt) {
     }
   });
 
-  await ensureAppServer({ entry });
+  await ensureAppServer({ entry, envMode: spec.env || 'inherit' });
   // sandbox 必须显式传下去：不传就完全取决于 codex 的本机默认配置，
   // 只读任务可能在可写环境里跑，写任务也可能被拒。
   // 不在 thread 层传 sandbox 字符串（枚举值未确认，传错整个会话起不来）；
@@ -225,8 +237,9 @@ async function runClaude(spec, route, pushItem, flush) {
 
   const child = spawn(argv[0], argv.slice(1), {
     cwd, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+    env: childEnv(spec.env || 'inherit'), // clean 模式剥离计费相关环境变量
   });
-  putJob({ ...getJob(jobId), pid: child.pid || null });
+  { const cur = getJob(jobId); if (cur) putJob({ ...cur, pid: child.pid || null }); }
 
   let out = '';
   let err = '';

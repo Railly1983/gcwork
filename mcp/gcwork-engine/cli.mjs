@@ -84,7 +84,7 @@ async function main() {
 
   if (cmd === 'verify') {
     if (!a.ref) throw new Error('verify 需要 --ref <job_id|task_id>');
-    const r = verify(a.ref);
+    const r = await verify(a.ref);
     if (!r) throw new Error(`找不到任务：${a.ref}`);
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
     return 0;

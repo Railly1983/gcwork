@@ -18,7 +18,7 @@ const DEFAULT_TIMEOUT_SEC = 1800; // 30 分钟安全上限，远高于宿主轮�
 const MAX_PROMPT = 200_000; // 简报上限保护
 const MAX_PARTIAL = 4000; // partialOutput 截断
 const MAX_PROGRESS_ITEMS = 40; // 进度里保留的最近条目数
-const HEARTBEAT_STALE_MS = 120_000; // 心跳超过这个时间没刷新，判定执行方已消失
+import { HEARTBEAT_STALE_MS } from './engine/locks.mjs'; // 与锁判活共用同一阈值，避免两处不一致
 
 // 进程内活跃任务（用于同目录写锁与状态查询；并发上限交给宿主，不再自己掐）
 const activeJobs = new Set();
@@ -164,7 +164,7 @@ export async function dispatch(taskInput = {}) {
     status: 'running',
     turnId: null,
     progress: { items: [], messageLength: 0, turnStatus: 'pending', updatedAt: startedAt },
-    pid: null,
+    pid: process.pid, // 执行该任务的进程；锁判活与超时处理都依赖它
     startedAt,
     timeoutSec,
     envMode: task.env || 'inherit',

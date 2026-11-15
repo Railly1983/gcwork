@@ -9,7 +9,7 @@
 //
 // 协议要点：initialize 响应后**必须**发 `initialized` 通知，否则后续请求可能不返回。
 import { spawn } from 'node:child_process';
-import { launcherFor } from '../models.mjs';
+import { launcherFor, childEnv } from '../models.mjs';
 
 const READY_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 60_000;
@@ -113,7 +113,7 @@ function handleLine(line, from = conn) {
  * 确保 app-server 已启动并完成握手。重复调用复用同一连接。
  * @param {{entry:string}} opts entry 为 codex 入口（.js 走 node，.cmd 走 cmd /c）
  */
-export async function ensureAppServer({ entry } = {}) {
+export async function ensureAppServer({ entry, envMode = 'inherit' } = {}) {
   if (conn && conn.status === 'ready' && conn.entry === entry) return appServerStatus();
   if (conn && conn.status === 'starting' && conn.entry === entry) {
     // 等它起来
@@ -132,6 +132,7 @@ export async function ensureAppServer({ entry } = {}) {
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
     detached: false, // 与 MCP 进程同生共死，避免留下孤儿 app-server
+    env: childEnv(envMode), // clean 模式剥离计费相关环境变量
   });
 
   conn = {
@@ -206,7 +207,7 @@ export async function ensureAppServer({ entry } = {}) {
   return appServerStatus();
 }
 
-/** 建一个会话。cwd/model/sandbox 都在这里定。 */
+/** 建一个会话。沙箱不在这一层定——统一由 turn 的 sandboxPolicy 表达。 */
 export async function startThread({ cwd, model, sandbox, approvalPolicy, ephemeral = true, config = null } = {}) {
   const params = { ephemeral };
   if (cwd) params.cwd = cwd;

@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { getJobStatus, locksDir } from './ledger.mjs';
 import { pidAlive } from './run.mjs';
 
-const HEARTBEAT_STALE_MS = 60_000; // 心跳超过这个时间算任务已死
+export const HEARTBEAT_STALE_MS = 120_000; // 与 dispatch 判活阈值保持一致 // 心跳超过这个时间算任务已死
 
 export function lockPathFor(cwd) {
   const h = createHash('sha1').update(resolve(cwd).toLowerCase()).digest('hex').slice(0, 16);
@@ -45,7 +45,12 @@ export function acquireLock(cwd, force = false) {
         // 任务可能跑在独立进程里，也可能跑在常驻 MCP 进程内（没有自己的 pid）。
         // 所以判活有三条线索：进程还在、心跳还新鲜、收尾时显式声明仍持锁。
         const running = held.status === 'running' || held.status === 'pending';
-        const alive = Boolean(held.pid && pidAlive(held.pid));
+        // 两处 pid 都要看：锁文件里的 pid 是「派单时写入的执行进程」，
+        // job 里的 pid 是「任务实际执行进程」。只查后者会在派单到首次心跳之间
+        // 把活锁判成死锁，两个写任务就会同时改同一批文件。
+        const alive = Boolean(
+          (holder.pid && pidAlive(holder.pid)) || (held.pid && pidAlive(held.pid)),
+        );
         const hbAge = held.heartbeatAt ? Date.now() - Date.parse(held.heartbeatAt) : Infinity;
         const fresh = hbAge < HEARTBEAT_STALE_MS;
         const undead = held.lockHeld === true;
