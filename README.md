@@ -81,7 +81,7 @@ node "$GCROOT/skills/gcwork-dispatch/scripts/dispatch.mjs" --check
 ~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/
 ```
 
-也可以从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.0.1.zip`，解压后放到同一位置。放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。
+也可以从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.0.2.zip`，解压后放到同一位置。放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。
 
 ## 成本
 

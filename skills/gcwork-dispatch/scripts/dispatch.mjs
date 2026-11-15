@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// 吉克搬砖 dispatch 2.0.1 — 把一份简报交给指定模型的外部 CLI，按档位自动选模型与强度。
+// 吉克搬砖 dispatch 2.0.2 — 把一份简报交给指定模型的外部 CLI，按档位自动选模型与强度。
 // 用法：
 //   node dispatch.mjs --tier <plan|hard|main|chore> --brief <path> [--cwd <dir>] [--env inherit|clean]
 //   node dispatch.mjs --model <id> [--effort <level>] --brief <path> [--cwd <dir>]
@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------- 常量
 
-const TOOL_VERSION = '2.0.1';
+const TOOL_VERSION = '2.0.2';
 
 // 内外层超时必须错开：外层到点会连脚本一起杀，来不及落盘和杀子进程树。
 const TIMEOUT_MS = 540_000; // 内部 CLI 硬上限
