@@ -1,5 +1,37 @@
 # 修订记录
 
+## 2.1.0 — 2026-11-15
+
+**架构精简：三层（专家 + Skill + MCP）改为两层（薄专家 + MCP 引擎），删除独立的派单 Skill。**
+
+### 结构变化
+
+- **薄专家** `agents/gcwork.md`：只留人设、前置条件、工具用法、汇报格式。原先的契约、路由、CLI 适配、错误码表全部下放到引擎，**专家文档不再重复这些逻辑**。
+- **MCP 引擎** `mcp/gcwork-engine/`：零依赖 Node stdio MCP server（JSON-RPC 2.0 over Content-Length 帧化）。
+  - 工具：`dispatch` / `status` / `resume` / `verify` / `health` / `list_jobs`。**契约即工具的 input/output schema**，模型调前可读。
+  - `models.mjs`：确定性 `route()`（review/只读→codex；refactor/implement 且文件>3→claude；fix/generate_tests→codex；high 风险→claude；显式 executor 不替换）+ `pickTarget()` + 严格模型解析 + CLI 入口探测 + **参数存在性探测（解析 `CLI --help`，缺参降级）** + 健康自检。
+  - `adapters/codex.mjs` / `adapters/claude.mjs`：构造 argv（参数探测降级）+ 结果解析。
+  - `engine/run.mjs`：**detached 子进程 + pid 轮询**，长任务脱离宿主/Agent 轮次上限独立跑完。
+  - `engine/ledger.mjs`：任务台账持久化（可 `GCWORK_HOME` 覆盖，测试隔离）。
+  - `verify.mjs`：独立验收（git 改动范围 + 敏感文件标记 + 跑测试，无 test 脚本则降级为 needsHuman，不硬判失败）。
+- **删除** `skills/gcwork-dispatch/`（契约/路由/adapter 已整体迁入引擎）。
+- `plugin.json`：版本升 2.1.0；移除 `skills` 字段；新增 `dependencies.mcpServers.gcwork-engine`（stdio，`node mcp/gcwork-engine/server.mjs`），由平台自动拉起。
+
+### 关键能力
+
+- **抗 9 分钟宿主超时**：派单走 detached 进程，宿主轮次上限杀不到；`status` / `resume` 主动回收结束的进程并收尾。这是本轮要解决的核心痛点（长任务被宿主杀、白烧额度）。
+- **半自动续跑**：任何失败先返 `partialOutput` + `changedFiles`；同 `task_id` 调 `resume` 即可开新 job 续跑，引擎把上一轮改动清单 + 剩余指令接上。`quota_exhausted` 在结果里带 `resumeAfter`，原样转告用户，等额度恢复再 `resume`，不静默无限重试。
+- **统一契约**：输出强制含 `status` / `artifacts` / `claims`（空，验收只看 artifacts）/ `partialOutput`（失败必非空）/ `changedFiles` / `resumeAfter`，消费方无需再读引擎内部。
+
+### 测试
+
+- 新增 `tests/engine.test.mjs`，34 项：路由、`pickTarget`、适配器参数探测降级、结果解析、错误分类、git 差集、台账、校验、**3 个 e2e（codex 成功 / codex 失败 / 半自动续跑）+ claude 成功**，以及 MCP server 帧化收发集成验证。全部不烧额度（用 fake CLI）。
+
+### 已知限制 / 后续
+
+- 并发：全局上限 4 单，同目录仅一个可写（写锁）；只读任务可并行。**git worktree 隔离为后续增强**（本版靠写锁保证不冲突）。
+- 平台是否真自动安装 `dependencies.mcpServers` 依赖待实装机验证；若未自动拉起，需在连接器入口手动信任。
+
 ## 2.0.2 — 2026-11-15
 
 只改对外展示文案与引导问题，**不改功能、不改参数、不改权限**。
