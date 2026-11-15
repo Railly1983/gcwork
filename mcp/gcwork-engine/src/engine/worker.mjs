@@ -9,7 +9,7 @@ import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { ensureAppServer, startThread, startTurn, subscribe, interruptTurn, shutdownAppServer } from './appserver.mjs';
+import { ensureAppServer, startThread, startTurn, subscribe, interruptTurn } from './appserver.mjs';
 import { getJob, putJob } from './ledger.mjs';
 import { gitSnapshot, gitDelta, snapshotFromJSON, gitDiffText } from './git.mjs';
 import { classifyError } from './errors.mjs';
@@ -50,9 +50,25 @@ export async function runJob(spec) {
     try { appendFileSync(logPath, `[worker] ${new Date().toISOString()} ${msg}\n`); } catch { /* 忽略 */ }
   };
 
-  // 立刻上报 pid：派单方据此判断 worker 是否活着
+  // 兜住异步回调里的异常：app-server 管道断开、JSON 解析失败这类错误发生在
+  // 事件回调里，不会走 main 的 catch，会直接把进程带走且不留任何痕迹。
+  const onCrash = (label) => (e) => {
+    log(`${label}：${(e && e.stack) || e}`);
+    if (route.status === 'running') {
+      route.status = 'failed';
+      route.error = `${label}：${(e && e.message) || e}`;
+      pushItem(`异常：${String((e && e.message) || e).slice(0, 100)}`);
+      finish(spec, route, runDir);
+    }
+    process.exit(1);
+  };
+  process.on('uncaughtException', onCrash('uncaughtException'));
+  process.on('unhandledRejection', onCrash('unhandledRejection'));
+
+  // 不写 workerPid：任务可能跑在常驻 MCP 进程里，那个 pid 属于服务本身，
+  // 记成 workerPid 会让超时处理误杀整个服务。用心跳时间判活就够了。
   const j0 = getJob(jobId);
-  if (j0) putJob({ ...j0, workerPid: process.pid, workerAliveAt: new Date().toISOString() });
+  if (j0) putJob({ ...j0, heartbeatAt: new Date().toISOString() });
   log(`worker 启动 pid=${process.pid} executor=${executor}`);
 
   const flush = (force = false) => {
@@ -63,6 +79,7 @@ export async function runJob(spec) {
     if (!job || job.status !== 'running') return;
     putJob({
       ...job,
+      heartbeatAt: new Date(now).toISOString(),
       progress: {
         items: route.items.slice(-MAX_ITEMS),
         messageLength: route.messageBuf.length,
@@ -81,7 +98,7 @@ export async function runJob(spec) {
   const heartbeat = setInterval(() => {
     const job = getJob(jobId);
     if (job && job.status === 'running') {
-      putJob({ ...job, workerPid: process.pid, workerAliveAt: new Date().toISOString() });
+      putJob({ ...job, heartbeatAt: new Date().toISOString() });
     }
   }, 5000);
 
@@ -100,7 +117,8 @@ export async function runJob(spec) {
     clearInterval(heartbeat);
     log(`收尾 status=${route.status} 消息长度=${route.messageBuf.length}`);
     finish(spec, route, runDir);
-    shutdownAppServer();
+    // 不在这里关 app-server：连接是进程级共享的，关掉会打断同进程里其他任务。
+    // 由进程退出时的钩子统一清理（见 server.mjs）。
   }
 }
 
@@ -110,9 +128,17 @@ async function runCodex(spec, route, pushItem, flush, startedAt) {
 
   let myThread = null;
   let myTurn = null;
+  // 严格路由：自己的 thread 还没确定之前不收任何事件，否则别的任务的
+  // 消息会混进来，导致提前判完成或串内容。
   subscribe(({ method, params }) => {
     const tid = params?.threadId || params?.thread?.id || null;
-    if (myThread && tid && tid !== myThread) return;
+    const tTurn = params?.turnId || params?.turn?.id || null;
+    // 归属判定：thread 或 turn 任一能对上才算自己的。
+    // 两个都没有说明无法归属，丢掉——宁可少记进度，也不要把别人的内容混进来。
+    if (tid && myThread && tid !== myThread) return;
+    if (tTurn && myTurn && tTurn !== myTurn) return;
+    if (!tid && !tTurn) return;
+    if (myThread && !tid && myTurn && !tTurn) return;
 
     if (method === 'turn/started') {
       if (params.turnId || params.turn?.id) myTurn = myTurn || params.turnId || params.turn.id;
@@ -150,11 +176,16 @@ async function runCodex(spec, route, pushItem, flush, startedAt) {
   });
 
   await ensureAppServer({ entry });
-  const th = await startThread({ cwd, model });
+  // sandbox 必须显式传下去：不传就完全取决于 codex 的本机默认配置，
+  // 只读任务可能在可写环境里跑，写任务也可能被拒。
+  const th = await startThread({ cwd, model, sandbox: spec.sandbox, approvalPolicy: 'never' });
   myThread = th.threadId;
   putJob({ ...getJob(jobId), threadId: myThread });
 
-  const { turnId } = await startTurn({ threadId: myThread, text: prompt, effort, model, cwd });
+  const { turnId } = await startTurn({
+    threadId: myThread, text: prompt, effort, model, cwd,
+    sandboxPolicy: sandboxPolicyOf(spec.sandbox),
+  });
   myTurn = turnId;
   putJob({ ...getJob(jobId), turnId });
   flush(true);
@@ -277,11 +308,17 @@ function finish(spec, route, runDir) {
       updatedAt: endedAt,
     },
     lockHeld: false,
-    workerPid: process.pid,
-    workerAliveAt: endedAt,
+    heartbeatAt: endedAt,
   });
 
   releaseLock(job.lockPath, jobId);
+}
+
+/** 沙箱语义 → app-server 的 sandboxPolicy 结构。 */
+function sandboxPolicyOf(sandbox) {
+  return sandbox === 'read-only'
+    ? { type: 'readOnly' }
+    : { type: 'workspaceWrite', writableRoots: [], networkAccess: false };
 }
 
 function mapError(text) {

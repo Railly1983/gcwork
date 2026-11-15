@@ -94,10 +94,21 @@ async function main() {
     if (!a.task) throw new Error('resume 需要 --task <task_id>');
     const r = await resume({
       task_id: a.task,
-      blocking: Boolean(a.blocking),
       timeout_sec: num(a.timeout),
+      env: a.env,
+      force: Boolean(a.force),
     });
-    process.stdout.write(`${JSON.stringify(r, null, 2)}\n`);
+    const { _spec, _specPath, ...pub } = r;
+    process.stdout.write(`${JSON.stringify(pub, null, 2)}\n`);
+    if (!_spec) return pub.status === 'rejected' ? 2 : 0;
+    try {
+      await runJob(_spec);
+    } catch (e) {
+      process.stderr.write(`[gcwork] 续跑异常：${(e && e.stack) || e}\n`);
+      return 1;
+    }
+    const final = status(pub.job_id) || status(pub.task_id);
+    process.stdout.write(`${JSON.stringify({ final }, null, 2)}\n`);
     return 0;
   }
 

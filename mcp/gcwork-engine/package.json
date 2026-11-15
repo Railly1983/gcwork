@@ -2,15 +2,13 @@
   "name": "gcwork-engine",
   "version": "2.2.0",
   "type": "module",
-  "description": "GCwork 极简专家背后的 MCP 引擎：统一契约派发 Codex/Claude CLI，抗宿主超时、产物验收、半自动续跑。零运行时依赖。",
-  "bin": {
-    "gcwork": "cli.mjs"
-  },
+  "description": "GCwork 派单引擎：通过 MCP 把任务派给本机 Codex/Claude CLI，统一路由、产物验收、失败续跑。零运行时依赖。",
   "engines": {
     "node": ">=18"
   },
   "files": [
-    "cli.mjs",
+    "server.mjs",
+    "bin/",
     "src/"
   ],
   "license": "MIT",

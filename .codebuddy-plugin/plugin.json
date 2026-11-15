@@ -67,8 +67,5 @@
       "zh": "我打算把构建从 webpack 换到 vite，你先评估方案、再拆任务清单。这两件事分头派给合适的人做，最后给我一份能直接开工的迁移计划。",
       "en": "I'm thinking about moving the build from webpack to vite. Evaluate the options first, then break it into a task list. Hand the two pieces to whoever fits best, and give me a migration plan I can start on right away."
     }
-  ],
-  "dependencies": {
-    "mcpServers": "./.mcp.json"
-  }
+  ]
 }

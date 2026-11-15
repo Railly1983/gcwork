@@ -9,6 +9,7 @@ import {
 import { gitSnapshot, gitDelta, snapshotToJSON, snapshotFromJSON, gitDiffText } from './engine/git.mjs';
 import { putJob, getJob, getJobStatus, getLatestByTask, resolveRef, listJobs, pruneRuns, runsDir, locksDir, ensureDirs } from './engine/ledger.mjs';
 import { pidAlive, killJob, markTimedOut, wasTimedOut } from './engine/run.mjs';
+import { acquireLock, releaseLock } from './engine/locks.mjs';
 import { classifyError, parseResumeAfter } from './engine/errors.mjs';
 import { readResult as codexRead } from './adapters/codex.mjs';
 import { readResult as claudeRead } from './adapters/claude.mjs';
@@ -17,6 +18,7 @@ const DEFAULT_TIMEOUT_SEC = 1800; // 30 分钟安全上限，远高于宿主轮�
 const MAX_PROMPT = 200_000; // 简报上限保护
 const MAX_PARTIAL = 4000; // partialOutput 截断
 const MAX_PROGRESS_ITEMS = 40; // 进度里保留的最近条目数
+const HEARTBEAT_STALE_MS = 120_000; // 心跳超过这个时间没刷新，判定执行方已消失
 
 // 进程内活跃任务（用于同目录写锁与状态查询；并发上限交给宿主，不再自己掐）
 const activeJobs = new Set();
@@ -31,8 +33,15 @@ function nowStamp() {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-function newJobId() {
-  return `${nowStamp()}-${randomUUID().slice(0, 8)}`;
+/** job_id 里带上模型短名，用户从任务标识就能看出用的什么模型。 */
+function newJobId(modelName = null) {
+  const tag = String(modelName || '')
+    .replace(/^gpt-[\d.]+-/i, '')   // gpt-6.1-sol -> sol
+    .replace(/[^a-z0-9]/gi, '')
+    .slice(0, 12)
+    .toLowerCase();
+  const tail = randomUUID().slice(0, 8);
+  return tag ? `${nowStamp()}-${tag}-${tail}` : `${nowStamp()}-${tail}`;
 }
 
 function truncate(s, max) {
@@ -68,96 +77,6 @@ function validateDispatch(task) {
     return `未知 role：${task.role}；可用 planner / implementer / reviewer`;
   }
   return null;
-}
-
-// ---------------------------------------------------------------- 写锁（同目录同时仅一个可写任务）
-
-function lockPathFor(cwd) {
-  const h = createHash('sha1').update(resolve(cwd).toLowerCase()).digest('hex').slice(0, 16);
-  return join(locksDir(), `${h}.lock`);
-}
-
-function acquireLock(cwd, force) {
-  const p = lockPathFor(cwd);
-  mkdirSync(locksDir(), { recursive: true });
-  const body = JSON.stringify({
-    pid: process.pid, jobId: 'pending', cwd: resolve(cwd), startedAt: new Date().toISOString(),
-  });
-  for (let i = 0; i < 2; i += 1) {
-    try {
-      writeFileSync(p, body, { flag: 'wx' });
-      return { ok: true, path: p };
-    } catch (e) {
-      if (e.code !== 'EEXIST') return { ok: false, code: 'rejected', detail: `并发锁创建失败：${e.message}` };
-      let holder = null;
-      try { holder = JSON.parse(readFileSync(p, 'utf8')); } catch { holder = null; }
-      // 判锁是否失效：优先查台账里对应 job 是否真的还在跑（taskkill 后 pid 可能复用/宿主 pid 常驻）。
-      // 台账读坏了不代表任务死了 —— 那种情况一律按「占用中」处理，宁可让用户重试。
-      const rec = holder?.jobId ? getJobStatus(holder.jobId) : { state: 'missing', job: null };
-      const held = rec.job;
-      let stale;
-      if (!holder) {
-        stale = true;
-      } else if (rec.state === 'corrupt') {
-        stale = false; // 台账损坏：无法证明任务已死，禁止抢锁
-      } else if (held) {
-        // 两种情况锁必须保留：
-        // 1) 任务仍 running 且子进程活着；
-        // 2) 收尾时进程没杀掉、显式标了 lockHeld（状态可能是 timeout，但锁必须还在）。
-        const stillRunning = held.status === 'running' && held.pid && pidAlive(held.pid);
-        const undead = held.lockHeld === true && held.pid && pidAlive(held.pid);
-        stale = !(stillRunning || undead);
-      } else {
-        // 台账里没有对应 job（锁是残留）→ 用 pid + 时间兜底
-        const age = holder.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
-        stale = !pidAlive(holder.pid) || age > 15 * 60_000;
-      }
-      // force 只允许清理「确认已死」的锁，不能抢活着的任务——
-      // 那等于主动制造同目录并发写。活锁只能等它结束。
-      const holderAlive = Boolean(holder && holder.pid && pidAlive(holder.pid));
-      const forceable = force && stale && !(held && held.pid && pidAlive(held.pid));
-      if (forceable || stale) {
-        // 删除前再确认一次持有者仍是同一个，缩小读-删之间的竞争窗口
-        let same = true;
-        try {
-          const now = JSON.parse(readFileSync(p, 'utf8'));
-          same = !holder || !now || now.jobId === holder.jobId;
-        } catch { same = false; }
-        if (same) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
-        continue;
-      }
-      const whyAlive = holderAlive ? '进程仍在运行' : '锁仍有效';
-      return { ok: false, code: 'busy', detail: `同一目录已有写入任务（${holder?.jobId || '?'}，${whyAlive}），等它结束后再试` };
-    }
-  }
-  return { ok: false, code: 'busy', detail: '并发锁获取失败，重试后仍被占用' };
-}
-
-/**
- * 释放写锁。传入 jobId 时校验归属：只有锁文件里记的还是自己才删。
- *
- * 用 rename 到临时名再删，而不是「读 → 判断 → 删」：
- * rename 在同一个目录内是原子的，抢到改名权的那一方才真正持有删除资格，
- * 避免旧 finalizer 在别人刚接手锁之后把新锁删掉。
- */
-function releaseLock(p, jobId = null) {
-  if (!p) return;
-  const tmp = `${p}.release-${process.pid}-${Date.now()}`;
-  try {
-    renameSync(p, tmp);
-  } catch {
-    return; // 已被别人移走/不存在
-  }
-  if (jobId) {
-    let owner = null;
-    try { owner = JSON.parse(readFileSync(tmp, 'utf8')); } catch { owner = null; }
-    if (owner && owner.jobId && owner.jobId !== jobId) {
-      // 移走的是别人的锁：尽力放回原位，避免误伤
-      try { renameSync(tmp, p); } catch { /* 放不回就只能删，不阻塞 */ }
-      return;
-    }
-  }
-  try { rmSync(tmp, { force: true }); } catch { /* 忽略 */ }
 }
 
 // ---------------------------------------------------------------- 派发
@@ -203,7 +122,7 @@ export async function dispatch(taskInput = {}) {
   }
 
   // jobId 要在 acquireLock 之后才能生成，这里提前生成以便写进锁文件
-  const jobId = newJobId();
+  const jobId = newJobId(target.name || modelInfo.model);
   if (task._lockPath) {
     try {
       writeFileSync(task._lockPath, JSON.stringify({
@@ -287,33 +206,35 @@ export function finalizeFromJob(jobId) {
   if (!job) return null;
   if (isTerminal(job.status)) return job;
 
-  // worker 模式：任务跑在独立进程里，靠 workerPid 判生死。
-  // worker 一死，要么它自己已经把终态写好，要么就是异常退出——两种情况都不该再等。
-  if (!job.workerPid) {
-    // worker 还没上报 pid：给一个启动宽限期，别把刚派出去的任务误判成死了
-    const since = job.workerStartedAt || job.startedAt;
-    const waited = since ? Date.now() - Date.parse(since) : 0;
-    if (waited < 60_000) return job;
-    return finalize(job); // 一分钟还没起来，判定启动失败
-  }
-
-  const workerAlive = pidAlive(job.workerPid);
-  if (!workerAlive) {
-    // worker 已退出但仍记着 running：说明它没走完收尾（崩溃/被杀）。
-    return finalize(job);
-  }
-
-  // worker 还活着，看是否超过 timeoutSec
   const limit = Number(job.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const elapsedMs = job.startedAt ? Date.now() - Date.parse(job.startedAt) : 0;
-  if (elapsedMs >= limit * 1000) {
-    killJob(job.workerPid);
-    markTimedOut(job.runDir);
-    if (job.pid) { try { killJob(job.pid); } catch { /* 忽略 */ } }
-    return finalize(job);
+
+  // 有独立进程的任务：优先按进程死活判。进程已退出就走 finalize，
+  // 由产物与 mtime 决定真实终态——不能因为「查询得晚」就判超时。
+  if (job.pid) {
+    if (!pidAlive(job.pid)) return finalize(job);
+    if (elapsedMs >= limit * 1000) {
+      killJob(job.pid);
+      markTimedOut(job.runDir);
+      return finalize(job);
+    }
+    return job;
   }
 
-  return job; // 仍在跑且未超时
+  // 进程内任务（跑在常驻 MCP 里）：没有独立 pid，只能靠心跳。
+  const lastBeat = job.heartbeatAt
+    ? Date.parse(job.heartbeatAt)
+    : (job.startedAt ? Date.parse(job.startedAt) : Date.now());
+  const hbAge = Date.now() - lastBeat;
+
+  if (elapsedMs >= limit * 1000) {
+    // 超时只落标记，不动任何进程：执行方自己会在 deadline 发 turn/interrupt。
+    markTimedOut(job.runDir);
+    return finalize(job);
+  }
+  if (hbAge > HEARTBEAT_STALE_MS) return finalize(job);
+
+  return job;
 }
 
 /** pid 已死或超时 → 解析产物、定状态、落盘。 */
@@ -535,7 +456,8 @@ export function recoverOrphans() {
     const j = getJob(id);
     if (!j || j.status !== 'running') continue;
     // worker 已消失但仍记着 running：收尾成明确状态，避免永远挂在那里
-    if (!j.workerPid || !pidAlive(j.workerPid)) {
+    const hbAge = j.heartbeatAt ? Date.now() - Date.parse(j.heartbeatAt) : Infinity;
+    if (hbAge > HEARTBEAT_STALE_MS) {
       const before = j.status;
       const after = finalizeFromJob(id);
       if (after && after.status !== before) recovered += 1;

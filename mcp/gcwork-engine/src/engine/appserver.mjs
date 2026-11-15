@@ -66,14 +66,20 @@ function emit(event) {
   }
 }
 
-function handleLine(line) {
+function handleLine(line, from = conn) {
   const text = line.trim();
   if (!text) return;
   let msg;
   try { msg = JSON.parse(text); } catch { return; }
 
-  // 响应
-  if (msg.id !== undefined && conn) {
+  // 旧连接的事件不能污染新连接：conn 已经被替换说明这条流已经废弃
+  if (from && from !== conn) return;
+
+  // 先看有没有 method：有 method 是请求或通知，没有才是响应。
+  // 反过来判断会把服务端的反向请求（带 id 的 method）当成响应吃掉。
+  const hasMethod = typeof msg.method === 'string';
+
+  if (!hasMethod && msg.id !== undefined && conn) {
     const p = conn.pending.get(msg.id);
     if (!p) return;
     conn.pending.delete(msg.id);
@@ -83,11 +89,10 @@ function handleLine(line) {
     return;
   }
 
-  // 通知 → 广播给订阅者
-  if (msg.method) emit({ method: msg.method, params: msg.params || {} });
+  if (!hasMethod) return;
 
-  // 服务端反向请求（审批等）：当前一律拒绝，避免任务挂死等一个没人处理的弹窗
-  if (msg.method && msg.id !== undefined) {
+  // 服务端反向请求（审批等）：一律拒绝，避免任务挂死等一个没人处理的弹窗
+  if (msg.id !== undefined) {
     try {
       sendRaw({
         jsonrpc: '2.0',
@@ -95,8 +100,14 @@ function handleLine(line) {
         error: { code: -32601, message: 'gcwork-engine 不支持交互式审批，请用沙箱策略规避' },
       });
     } catch { /* 忽略 */ }
+    emit({ method: msg.method, params: msg.params || {} });
+    return;
   }
+
+  // 通知 → 广播给订阅者
+  emit({ method: msg.method, params: msg.params || {} });
 }
+
 
 /**
  * 确保 app-server 已启动并完成握手。重复调用复用同一连接。
@@ -127,6 +138,8 @@ export async function ensureAppServer({ entry } = {}) {
     child, status: 'starting', nextId: 1, pending: new Map(),
     stderrTail: [], entry,
   };
+  // 捕获当前连接身份：子进程回调里对比，旧连接的事件不会污染新连接
+  const thisConn = conn;
 
   let buf = '';
   child.stdout.on('data', (d) => {
@@ -135,10 +148,11 @@ export async function ensureAppServer({ entry } = {}) {
     while ((nl = buf.indexOf('\n')) !== -1) {
       const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
-      handleLine(line);
+      handleLine(line, thisConn);
     }
   });
   child.stderr.on('data', (d) => {
+    if (thisConn !== conn) return;
     const t = d.toString().trim();
     if (!t) return;
     if (/stale arg0|failed to clean up/i.test(t)) return; // 无害告警
@@ -148,9 +162,23 @@ export async function ensureAppServer({ entry } = {}) {
     }
   });
   child.on('error', (e) => {
-    if (conn) { conn.status = 'broken'; conn.stderrTail.push(`spawn error: ${e && e.message}`); }
+    if (thisConn !== conn) return;
+    conn.status = 'broken';
+    conn.stderrTail.push(`spawn error: ${e && e.message}`);
+  });
+  // 管道断裂（子进程被杀）会抛 EPIPE，不接住会直接把宿主进程带走
+  child.stdin.on('error', (e) => {
+    if (thisConn !== conn) return;
+    conn.status = 'broken';
+    conn.stderrTail.push(`stdin error: ${e && e.message}`);
+  });
+  child.stdout.on('error', (e) => {
+    if (thisConn !== conn) return;
+    conn.status = 'broken';
+    conn.stderrTail.push(`stdout error: ${e && e.message}`);
   });
   child.on('exit', (code) => {
+    if (thisConn !== conn) return;
     if (conn) {
       conn.status = 'broken';
       conn.stderrTail.push(`app-server 退出 code=${code}`);

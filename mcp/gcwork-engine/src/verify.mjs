@@ -1,7 +1,7 @@
 // 验收：只看产物（artifacts），不轻信 CLI 自称「已完成」。git 范围审查 + 敏感文件标记 +
 // 跑测试（无 test 脚本则降级为 needsHuman，不硬判失败）。
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveRef } from './engine/ledger.mjs';
 import { gitSnapshot, gitDelta, snapshotFromJSON } from './engine/git.mjs';
@@ -92,8 +92,24 @@ export function verify(ref) {
   // 测试：仅在存在 test 脚本时跑；否则降级为 needsHuman，不硬判失败。
   let testsPassed = null;
   let testRan = false;
-  const pkgPath = join(workdir, 'package.json');
-  if (existsSync(pkgPath)) {
+  // package.json 可能不在仓库根目录：先看根，再往下找一层（monorepo 常见结构）。
+  // 只看根目录会把有测试的项目误判成「无法自动验证」。
+  let pkgDir = null;
+  const rootPkg = join(workdir, 'package.json');
+  if (existsSync(rootPkg)) {
+    pkgDir = workdir;
+  } else {
+    try {
+      for (const ent of readdirSync(workdir, { withFileTypes: true })) {
+        if (!ent.isDirectory() || ent.name === 'node_modules' || ent.name.startsWith('.')) continue;
+        const cand = join(workdir, ent.name, 'package.json');
+        if (existsSync(cand)) { pkgDir = join(workdir, ent.name); break; }
+      }
+    } catch { /* 目录读不了就按非 Node 项目处理 */ }
+  }
+
+  if (pkgDir) {
+    const pkgPath = join(pkgDir, 'package.json');
     let scripts = {};
     try {
       scripts = JSON.parse(readFileSync(pkgPath, 'utf8')).scripts || {};
@@ -106,7 +122,7 @@ export function verify(ref) {
       const [cmd, args] = npmCli
         ? [process.execPath, [npmCli, 'test']]
         : ['npm', ['test']];
-      const r = spawnSync(cmd, args, { cwd: workdir, encoding: 'utf8', timeout: 300_000, windowsHide: true });
+      const r = spawnSync(cmd, args, { cwd: pkgDir, encoding: 'utf8', timeout: 300_000, windowsHide: true });
       testsPassed = r.status === 0;
       if (!testsPassed) {
         accepted = false;
@@ -119,7 +135,7 @@ export function verify(ref) {
     }
   } else {
     needsHuman = true;
-    reasons.push('非 Node 项目或无 package.json，无法自动测试，需人工确认');
+    reasons.push('未找到 package.json，无法自动测试，需人工确认');
   }
 
   // 明确拒绝（HEAD 移动 / 测试失败）时不再算「待人工」

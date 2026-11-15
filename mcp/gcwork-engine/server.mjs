@@ -71,10 +71,16 @@ const handlers = {
     return r;
   },
   async resume(args = {}) {
-    return resume({
+    const r = await resume({
       task_id: args.task_id,
       timeout_sec: args.timeout_sec,
+      env: args.env,
+      force: args.force,
     });
+    // 续跑同样要真的把任务跑起来，不能只建记录；内部 spec 不能返回给客户端
+    const { _spec, _specPath, ...pub } = r;
+    if (_spec) runInBackground(_spec);
+    return pub;
   },
   async health() {
     return health();

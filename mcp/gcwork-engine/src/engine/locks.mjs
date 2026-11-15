@@ -6,6 +6,8 @@ import { join, resolve } from 'node:path';
 import { getJobStatus, locksDir } from './ledger.mjs';
 import { pidAlive } from './run.mjs';
 
+const HEARTBEAT_STALE_MS = 60_000; // 心跳超过这个时间算任务已死
+
 export function lockPathFor(cwd) {
   const h = createHash('sha1').update(resolve(cwd).toLowerCase()).digest('hex').slice(0, 16);
   return join(locksDir(), `${h}.lock`);
@@ -40,11 +42,14 @@ export function acquireLock(cwd, force = false) {
         // 台账损坏不代表任务已死，宁可让用户重试
         stale = false;
       } else if (held) {
-        const stillRunning = held.status === 'running' && held.pid && pidAlive(held.pid);
-        const undead = held.lockHeld === true && held.pid && pidAlive(held.pid);
-        // worker 模式：worker 进程自己活着也算占用
-        const workerAlive = held.status === 'running' && held.workerPid && pidAlive(held.workerPid);
-        stale = !(stillRunning || undead || workerAlive);
+        // 任务可能跑在独立进程里，也可能跑在常驻 MCP 进程内（没有自己的 pid）。
+        // 所以判活有三条线索：进程还在、心跳还新鲜、收尾时显式声明仍持锁。
+        const running = held.status === 'running' || held.status === 'pending';
+        const alive = Boolean(held.pid && pidAlive(held.pid));
+        const hbAge = held.heartbeatAt ? Date.now() - Date.parse(held.heartbeatAt) : Infinity;
+        const fresh = hbAge < HEARTBEAT_STALE_MS;
+        const undead = held.lockHeld === true;
+        stale = !(running && (alive || fresh || undead));
       } else {
         const age = holder.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
         stale = !pidAlive(holder.pid) || age > 15 * 60_000;
