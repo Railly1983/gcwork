@@ -1,0 +1,12 @@
+# shell 脚本必须 LF，否则 macOS / Linux 上报 bad interpreter: ^M
+bin/run-node text eol=lf
+*.sh text eol=lf
+
+# Windows 批处理必须 CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 源码统一 LF，避免跨平台 diff 噪音
+*.mjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
