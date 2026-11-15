@@ -52,19 +52,22 @@ export async function runJob(spec) {
 
   // 兜住异步回调里的异常：app-server 管道断开、JSON 解析失败这类错误发生在
   // 事件回调里，不会走 main 的 catch，会直接把进程带走且不留任何痕迹。
+  // 钩子只处理「自己这个任务」：常驻进程里同时可能跑多单，
+  // 旧任务的 handler 若不摘掉，会把别人的失败记到自己头上并释放别人的写锁。
   const onCrash = (label) => (e) => {
+    if (route.status !== 'running') return;
     log(`${label}：${(e && e.stack) || e}`);
-    if (route.status === 'running') {
-      route.status = 'failed';
-      route.error = `${label}：${(e && e.message) || e}`;
-      pushItem(`异常：${String((e && e.message) || e).slice(0, 100)}`);
-      finish(spec, route, runDir);
-    }
+    route.status = 'failed';
+    route.error = `${label}：${(e && e.message) || e}`;
+    pushItem(`异常：${String((e && e.message) || e).slice(0, 100)}`);
+    finish(spec, route, runDir);
     // 绝不 process.exit：任务跑在常驻 MCP 进程里，退出会把整个服务和
     // 其他正在跑的任务一起带走。这里只收尾当前任务，进程继续服务。
   };
-  process.on('uncaughtException', onCrash('uncaughtException'));
-  process.on('unhandledRejection', onCrash('unhandledRejection'));
+  const crashHandler = onCrash('uncaughtException');
+  const rejectHandler = onCrash('unhandledRejection');
+  process.on('uncaughtException', crashHandler);
+  process.on('unhandledRejection', rejectHandler);
 
   // 不写 workerPid：任务可能跑在常驻 MCP 进程里，那个 pid 属于服务本身，
   // 记成 workerPid 会让超时处理误杀整个服务。用心跳时间判活就够了。
@@ -117,6 +120,8 @@ export async function runJob(spec) {
     pushItem(`启动失败：${route.error.slice(0, 100)}`);
   } finally {
     clearInterval(heartbeat);
+    process.off('uncaughtException', crashHandler);
+    process.off('unhandledRejection', rejectHandler);
     log(`收尾 status=${route.status} 消息长度=${route.messageBuf.length}`);
     finish(spec, route, runDir);
     // 不在这里关 app-server：连接是进程级共享的，关掉会打断同进程里其他任务。
@@ -263,11 +268,10 @@ async function runClaude(spec, route, pushItem, flush) {
     if (r.isError) {
       route.status = 'failed';
       route.error = String(r.message || 'Claude 报错');
-    } else if (route.messageBuf.trim()) {
-      route.status = 'completed';
     } else {
-      route.status = 'failed';
-      route.error = err.trim() || 'claude 没有输出';
+      // 没有文字输出不代表失败：只改文件、不做总结是正常行为。
+      // 真正的失败会以 is_error 或非零退出码体现。
+      route.status = 'completed';
     }
     pushItem(route.status === 'completed' ? '执行结束' : '执行失败');
     flush(true);
@@ -324,6 +328,16 @@ function finish(spec, route, runDir) {
     },
     lockHeld: false,
     heartbeatAt: endedAt,
+    // 产物路径必须落进台账，否则正常完成的任务 artifacts 恒为 null，
+    // 调用方拿不到 message/diff 的位置
+    artifacts: {
+      changed_files: changedFiles.length ? join(runDir, 'changed.txt') : null,
+      diff_path: diff ? join(runDir, 'diff.txt') : null,
+      stdout_path: join(runDir, 'stdout.log'),
+      stderr_path: join(runDir, 'stderr.log'),
+      message_path: join(runDir, 'message.md'),
+      result_path: join(runDir, 'result.json'),
+    },
   });
 
   releaseLock(job.lockPath, jobId);

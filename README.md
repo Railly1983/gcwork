@@ -6,7 +6,7 @@ Codex/Claude协作专家。不写业务代码——判断任务难度、写简�
 
 - **薄专家层** `agents/gcwork.md`：只有人设、前置条件、怎么用工具、汇报格式。不含契约、路由、CLI 适配逻辑。
 - **MCP 引擎** `mcp/gcwork-engine/`：零依赖 Node stdio MCP server，统一派发、路由、产物解析、验收、续跑。所有判断逻辑都在这里。
-- **执行通道**：Codex 走常驻 `app-server`（`thread/start` → `turn/start`，受理毫秒级、进度实时），；Claude 走 `claude -p` 一次性子进程。
+- **执行通道**：Codex 走常驻 `app-server`（`thread/start` → `turn/start`，受理毫秒级、进度实时）；Claude 走 `claude -p` 一次性子进程。
 
 两层之间靠 **MCP 工具的 input/output schema 即契约**，模型调前可读，不需要把契约写进文档。
 
@@ -83,7 +83,7 @@ node server.mjs        # 作为 MCP server 启动（stdio）
 ## 结构
 
 ```
-.codebuddy-plugin/plugin.json      专家清单（agent 型）+ dependencies.mcpServers
+.codebuddy-plugin/plugin.json      专家清单（agent 型）；MCP 由包根 .mcp.json 自动加载
 agents/gcwork.md                   薄专家：人设、前置、工具用法、汇报格式
 mcp/gcwork-engine/
   server.mjs                       MCP stdio server（零依赖）
@@ -97,6 +97,9 @@ mcp/gcwork-engine/
     engine/git.mjs                  git 快照与变更计算
     engine/ledger.mjs               任务台账持久化
     engine/run.mjs                  进程存活探测与超时标记
+    engine/worker.mjs               单任务执行器（进度累积、收尾判定）
+    engine/appserver.mjs            codex app-server 客户端（连接、通知流）
+    engine/locks.mjs                同目录写锁
     engine/errors.mjs               错误分类 + quota 恢复时间解析
 tests/engine.test.mjs              51 项单元测试（node --test，不烧额度）
 avatars/expert.png                 专家头像

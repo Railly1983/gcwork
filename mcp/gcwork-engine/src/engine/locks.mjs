@@ -11,7 +11,10 @@ import { pidAlive } from './run.mjs';
 export const HEARTBEAT_STALE_MS = 180_000;
 
 export function lockPathFor(cwd) {
-  const h = createHash('sha1').update(resolve(cwd).toLowerCase()).digest('hex').slice(0, 16);
+  // 只有 Windows 文件系统大小写不敏感，才需要归一化；
+  // POSIX 上 /Foo 与 /foo 是两个目录，强制小写会让它们共用一把锁。
+  const key = process.platform === 'win32' ? resolve(cwd).toLowerCase() : resolve(cwd);
+  const h = createHash('sha1').update(key).digest('hex').slice(0, 16);
   return join(locksDir(), `${h}.lock`);
 }
 
@@ -55,8 +58,13 @@ export function acquireLock(cwd, force = false) {
         );
         const hbAge = held.heartbeatAt ? Date.now() - Date.parse(held.heartbeatAt) : Infinity;
         const fresh = hbAge < HEARTBEAT_STALE_MS;
-        const undead = held.lockHeld === true;
-        stale = !(running && (alive || fresh || undead));
+        // lockHeld 必须独立于 running 判断：它专门用于「任务已判终态（如 timeout）
+        // 但执行进程还在写文件」这种情况。若要求 running 才生效，这条永远是死条件，
+        // 下一单会直接把锁抢走，和仍在写的进程一起改同一批文件。
+        const undead = held.lockHeld === true && Boolean(
+          (held.pid && pidAlive(held.pid)) || (holder.pid && pidAlive(holder.pid)),
+        );
+        stale = !((running && (alive || fresh)) || undead);
       } else {
         const age = holder.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
         stale = !pidAlive(holder.pid) || age > 15 * 60_000;

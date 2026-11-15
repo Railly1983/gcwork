@@ -114,8 +114,12 @@ function handleLine(line, from = conn) {
  * @param {{entry:string}} opts entry 为 codex 入口（.js 走 node，.cmd 走 cmd /c）
  */
 export async function ensureAppServer({ entry, envMode = 'inherit' } = {}) {
-  if (conn && conn.status === 'ready' && conn.entry === entry) return appServerStatus();
-  if (conn && conn.status === 'starting' && conn.entry === entry) {
+  // envMode 也要比对：clean 模式剥离了计费相关环境变量，复用旧连接等于没剥离
+  if (conn && conn.status === 'ready' && conn.entry === entry && conn.envMode === envMode) {
+    return appServerStatus();
+  }
+  // 环境模式不一致就必须重建，否则 clean 承诺静默失效
+  if (conn && conn.status === 'starting' && conn.entry === entry && conn.envMode === envMode) {
     // 等它起来
     for (let i = 0; i < 300; i += 1) {
       if (!conn || conn.status !== 'starting') break;
@@ -137,7 +141,7 @@ export async function ensureAppServer({ entry, envMode = 'inherit' } = {}) {
 
   conn = {
     child, status: 'starting', nextId: 1, pending: new Map(),
-    stderrTail: [], entry,
+    stderrTail: [], entry, envMode,
   };
   // 捕获当前连接身份：子进程回调里对比，旧连接的事件不会污染新连接
   const thisConn = conn;

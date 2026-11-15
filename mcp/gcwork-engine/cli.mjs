@@ -8,7 +8,7 @@
 // 用法：
 //   node cli.mjs dispatch --workdir <dir> --prompt <text> [--task <id>] [--executor codex|claude]
 //                                [--model <name>] [--effort low|medium|high] [--role planner|implementer|reviewer]
-//                                [--sandbox read-only|workspace-write] [--timeout 1800]
+//                                [--sandbox read-only|workspace-write] [--timeout 1800] [--env inherit|clean]
 //   node cli.mjs status  --ref <job_id|task_id>
 //   node cli.mjs verify  --ref <job_id|task_id>
 //   node cli.mjs resume  --task <id>
@@ -51,10 +51,10 @@ async function main() {
 
   dispatch --workdir <dir> --prompt <text> [--task <id>] [--executor codex|claude]
            [--model <name>] [--effort low|medium|high] [--role planner|implementer|reviewer]
-           [--sandbox read-only|workspace-write] [--timeout 1800]
+           [--sandbox read-only|workspace-write] [--timeout 1800] [--env inherit|clean]
   status   --ref <job_id|task_id>
   verify   --ref <job_id|task_id>
-  resume   --task <id>
+  resume   --task <id> [--env inherit|clean] [--force]
   health
   list     [--limit 20]
 
