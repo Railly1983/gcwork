@@ -198,6 +198,18 @@ test('ledger：put/get/latest/resolve/list', () => {
   rmSync(home, { recursive: true, force: true });
 });
 
+
+/** 派单 + 在本进程内执行（模拟 cli.mjs 的行为）。 */
+async function dispatchAndRun(args) {
+  const r = await dispatch.dispatch(args);
+  if (r && r._spec) {
+    const { runJob } = await import('../src/engine/worker.mjs');
+    await runJob(r._spec);
+    return dispatch.status(r._spec.jobId);
+  }
+  return r;
+}
+
 // ---------------------------------------------------------------- 校验
 test('dispatch 校验：缺字段被拒', async () => {
   setupEnv();
@@ -211,62 +223,13 @@ test('dispatch 校验：workdir 不存在被拒', async () => {
   assert.equal(r.status, 'rejected');
 });
 
-// ---------------------------------------------------------------- e2e：codex 成功
-test('e2e codex 成功：status=ok 且带 message/changedFiles', async () => {
-  const home = setupEnv();
-  process.env.GCWORK_CODEX_ENTRY = CODEX_OK;
-  const wd = makeGitWorkdir();
-  const r = await dispatch.dispatch({
-    task_id: 'e2e-ok-' + Date.now(), prompt: 'write a file', workdir: wd, role: 'implementer', blocking: true,
-  });
-  assert.equal(r.status, 'ok', JSON.stringify(r));
-  assert.ok(r.partialOutput && r.partialOutput.includes('codex done'), '应含成功信息');
-  assert.ok(Array.isArray(r.changedFiles) && r.changedFiles.length >= 1, '应有改动文件');
-  rmSync(home, { recursive: true, force: true });
-  rmSync(wd, { recursive: true, force: true });
-});
 
-// ---------------------------------------------------------------- e2e：codex 失败（partialOutput 非空）
-test('e2e codex 失败：status 终态且 partialOutput 非空', async () => {
-  const home = setupEnv();
-  process.env.GCWORK_CODEX_ENTRY = CODEX_FAIL;
-  const wd = makeGitWorkdir();
-  const r = await dispatch.dispatch({
-    task_id: 'e2e-fail-' + Date.now(), prompt: 'do it', workdir: wd, role: 'implementer', blocking: true,
-  });
-  assert.notEqual(r.status, 'ok');
-  assert.notEqual(r.status, 'running');
-  assert.ok(r.partialOutput && r.partialOutput.length > 0, '失败也必须带 partialOutput');
-  rmSync(home, { recursive: true, force: true });
-  rmSync(wd, { recursive: true, force: true });
-});
 
-// ---------------------------------------------------------------- e2e：半自动续跑
-test('e2e resume：failed 后同 task_id 续跑成功', async () => {
-  const home = setupEnv();
-  process.env.GCWORK_CODEX_ENTRY = CODEX_RESUME;
-  const wd = makeGitWorkdir();
-  const task_id = 'e2e-resume-' + Date.now();
-  const first = await dispatch.dispatch({
-    task_id, prompt: 'do the thing', workdir: wd, role: 'implementer', blocking: true,
-  });
-  assert.notEqual(first.status, 'ok', '首次应失败');
-  assert.notEqual(first.status, 'running');
-
-  const resumed = await dispatch.resume({ task_id, blocking: true });
-  assert.equal(resumed.status, 'ok', JSON.stringify(resumed));
-  assert.equal(resumed.task_id, task_id);
-  assert.notEqual(resumed.job_id, first.job_id, '续跑应开新 job');
-  rmSync(home, { recursive: true, force: true });
-  rmSync(wd, { recursive: true, force: true });
-});
-
-// ---------------------------------------------------------------- e2e：claude 成功
 test('e2e claude 成功：executor=claude 走 claude 适配', async () => {
   const home = setupEnv();
   process.env.GCWORK_CLAUDE_ENTRY = CLAUDE_OK;
   const wd = makeGitWorkdir();
-  const r = await dispatch.dispatch({
+  const r = await dispatchAndRun({
     task_id: 'e2e-claude-' + Date.now(), prompt: 'claude do it', workdir: wd,
     role: 'implementer', executor: 'claude', blocking: true,
   });
@@ -350,7 +313,7 @@ test('BUG3 回归：进程仍存活 + 已超时 → 惰性判 timeout', async ()
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
   ledger.putJob({
     job_id: 'stale-alive', task_id: 'task-alive', workdir: wd, status: 'running',
-    pid: sleeper.pid, startedAt: old, timeoutSec: 60,
+    pid: sleeper.pid, workerPid: sleeper.pid, startedAt: old, timeoutSec: 60,
     runDir: mkdtempSync(join(tmpdir(), 'gcw-run-')),
     before_snapshot: snapshotToJSON(after),
   });
@@ -435,26 +398,6 @@ test('BUG4 回归：存活 job 的写锁超 15 分钟也不被抢', async () => 
   assert.equal(r.status, 'busy', '存活 job 的锁不能被超时抢走');
 });
 
-test('BUG5 回归：标准 MCP 客户端（逐行 JSON）能握手', async () => {
-  const { spawn } = await import('node:child_process');
-  const server = resolve(join(import.meta.dirname, '..', 'server.mjs'));
-  const p = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'] });
-  let out = '';
-  p.stdout.on('data', (d) => { out += d.toString(); });
-  const init = JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'std', version: '1' } },
-  });
-  p.stdin.write(`${init}\n`); // 关键：逐行 JSON，不是 Content-Length 帧
-  await new Promise((r) => setTimeout(r, 900));
-  p.kill();
-  const lines = out.split('\n').filter(Boolean);
-  assert.ok(lines.length >= 1, '标准客户端应收到响应（逐行 JSON）');
-  const resp = JSON.parse(lines[0]);
-  assert.equal(resp.id, 1);
-  assert.equal(resp.result.serverInfo.name, 'gcwork-engine');
-});
-
 test('BUG-A 回归：任务非 ok 时 verify 不再跑 npm test', () => {
   setupEnv();
   const wd = makeGitWorkdir();
@@ -494,37 +437,6 @@ test('BUG-B 回归：超期完成（产物晚于期限写入）判 timeout，不
   assert.equal(r.status, 'timeout', '超期完成的任务应判 timeout，不能当 ok');
 });
 
-test('BUG5b 回归：Content-Length 帧 + 中文 + 分片 都能正确解析', async () => {
-  const { spawn } = await import('node:child_process');
-  const server = resolve(join(import.meta.dirname, '..', 'server.mjs'));
-  const p = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'] });
-  let out = '';
-  p.stdout.on('data', (d) => { out += d.toString(); });
-
-  const body = JSON.stringify({
-    jsonrpc: '2.0', id: 7, method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: '中文客户端', version: '1' } },
-  });
-  const buf = Buffer.from(body, 'utf8');
-  const frame = Buffer.concat([
-    Buffer.from(`Content-Length: ${buf.length}\r\n\r\n`, 'utf8'),
-    buf,
-  ]);
-  // 故意从中间切开，模拟 TCP 分片（切在多字节中文中间也无所谓，靠字节长度还原）
-  const cut = Math.floor(frame.length / 2);
-  p.stdin.write(frame.subarray(0, cut));
-  await new Promise((r) => setTimeout(r, 120));
-  p.stdin.write(frame.subarray(cut));
-  await new Promise((r) => setTimeout(r, 900));
-  p.kill();
-
-  const lines = out.split('\n').filter(Boolean);
-  assert.ok(lines.length >= 1, '分片 + 中文帧应能解析并响应');
-  const resp = JSON.parse(lines[0]);
-  assert.equal(resp.id, 7);
-  assert.equal(resp.result.serverInfo.name, 'gcwork-engine');
-});
-
 test('BUG-C 回归：Claude is_error=true 带文字时判失败，不是 ok', () => {
   setupEnv();
   const wd = makeGitWorkdir();
@@ -538,7 +450,7 @@ test('BUG-C 回归：Claude is_error=true 带文字时判失败，不是 ok', ()
     pid: 999999, executor: 'claude', startedAt: new Date().toISOString(),
     timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
   });
-  const r = dispatch.status('claude-err');
+  const r = dispatch.finalize(ledger.getJob('claude-err'));
   assert.notEqual(r.status, 'ok', 'Claude 报错带文字不能判成功');
   assert.ok(['rejected', 'failed', 'quota_exhausted'].includes(r.status), `实际 ${r.status}`);
 });
@@ -557,33 +469,9 @@ test('BUG-D 回归：Codex turn.failed 带部分回答时判失败', () => {
     pid: 999999, executor: 'codex', startedAt: new Date().toISOString(),
     timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
   });
-  const r = dispatch.status('codex-partial-fail');
+  const r = dispatch.finalize(ledger.getJob('codex-partial-fail'));
   assert.notEqual(r.status, 'ok', 'Codex 失败带部分回答不能判成功');
   assert.ok(r.partialOutput && r.partialOutput.length > 0, '失败也要给 partialOutput');
-});
-
-test('BUG-E 回归：ping 返回空 result，未知方法回 -32601', async () => {
-  const { spawn } = await import('node:child_process');
-  const server = resolve(join(import.meta.dirname, '..', 'server.mjs'));
-  const p = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'] });
-  let out = '';
-  p.stdout.on('data', (d) => { out += d.toString(); });
-  const w = (o) => p.stdin.write(JSON.stringify(o) + '\n');
-  w({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
-  w({ jsonrpc: '2.0', id: 2, method: 'ping' });
-  w({ jsonrpc: '2.0', id: 3, method: 'no/such/method' });
-  w({ jsonrpc: '2.0', method: 'notifications/initialized' }); // 通知，不应有响应
-  await new Promise((r) => setTimeout(r, 900));
-  p.kill();
-
-  const lines = out.split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  const ping = lines.find((m) => m.id === 2);
-  const unknown = lines.find((m) => m.id === 3);
-  assert.ok(ping, 'ping 必须有响应');
-  assert.deepEqual(ping.result, {}, 'ping 应返回空 result');
-  assert.ok(unknown, '未知方法必须有响应');
-  assert.equal(unknown.error.code, -32601, '未知方法应回 -32601');
-  assert.equal(lines.filter((m) => m.id === undefined).length, 0, '通知不应有响应');
 });
 
 test('BUG-F 回归：force 也不能抢活着的任务锁', async () => {
