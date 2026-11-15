@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
 import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
 
-export const TOOL_VERSION = '2.1.0';
+export const TOOL_VERSION = '2.1.1';
 
 // 思考强度词表（与 CLI 对齐）。
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -92,8 +92,15 @@ export function pickTarget(task = {}) {
     const name = normModel(task.model);
     if (!name) return { error: `未知模型：${task.model}；可用：${Object.keys(MODELS).join(', ')}` };
     const m = MODELS[name];
-    const sandbox = task.sandbox || (m.tier === 'plan' ? 'read-only' : 'workspace-write');
-    const effort = normEffort(task.effort) || TIER_EFFORT[m.tier];
+    // 沙箱优先级：显式 sandbox > 只读角色(planner/reviewer)的只读默认 > 模型 tier 默认。
+    // 不能让显式 model 悄悄把 reviewer 变成可写——只读角色必须默认只读。
+    const role = normRole(task.role);
+    const roleProfile = role ? ROLE_PROFILE[role] : null;
+    const defaultSandbox = roleProfile && roleProfile.need_write === false
+      ? 'read-only'
+      : (m.tier === 'plan' ? 'read-only' : 'workspace-write');
+    const sandbox = task.sandbox || defaultSandbox;
+    const effort = normEffort(task.effort) || (roleProfile ? roleProfile.defaultEffort : TIER_EFFORT[m.tier]);
     return { cli: m.cli, name, effort, sandbox, readOnly: sandbox === 'read-only' };
   }
 

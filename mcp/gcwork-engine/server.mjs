@@ -1,38 +1,50 @@
 #!/usr/bin/env node
-// GCwork 引擎 MCP server：零依赖，JSON-RPC 2.0 over Content-Length 帧化的 stdio。
+// GCwork 引擎 MCP server：零依赖，JSON-RPC 2.0 over stdio。
+// 传输遵循 MCP 标准：输出为逐行 JSON（newline-delimited）；输入兼容逐行 JSON 与
+// Content-Length 帧两种写法（后者仅用于兼容自测客户端，标准客户端走逐行）。
 // 启动即回收孤儿 job；按需提供 dispatch/status/resume/verify/health/list_jobs。
 import { dispatch, status, resume, recoverOrphans, listJobsTool } from './src/dispatch.mjs';
 import { verify } from './src/verify.mjs';
 import { health } from './src/models.mjs';
 import { TOOLS } from './src/schema.mjs';
 
-const SERVER_INFO = { name: 'gcwork-engine', version: '2.1.0' };
+const SERVER_INFO = { name: 'gcwork-engine', version: '2.1.1' };
 
-// ---------------------------------------------------------------- 帧化收发
+// ---------------------------------------------------------------- 收发
+// 输出：MCP 标准逐行 JSON（每条消息一行，UTF-8，以 \n 结尾）。
 function send(obj) {
-  const payload = JSON.stringify(obj);
-  const buf = Buffer.from(payload, 'utf8');
-  process.stdout.write(`Content-Length: ${buf.length}\r\n\r\n`);
-  process.stdout.write(buf);
+  process.stdout.write(`${JSON.stringify(obj)}\n`);
 }
 
-let buf = Buffer.alloc(0);
+let buf = '';
 
-function extractMessage() {
-  // 从累积 buffer 里尽可能多地解出完整 JSON-RPC 消息
+// 输入解析：优先识别 Content-Length 帧；否则按行切分逐行 JSON。
+// 标准 MCP 客户端发的是逐行 JSON，必须支持，否则握手无响应。
+function extractMessages() {
   const out = [];
   while (true) {
-    const headerEnd = buf.indexOf('\r\n\r\n');
-    if (headerEnd === -1) break;
-    const header = buf.slice(0, headerEnd).toString('utf8');
-    const m = header.match(/Content-Length:\s*(\d+)/i);
-    if (!m) { buf = buf.slice(headerEnd + 4); continue; }
-    const len = Number(m[1]);
-    const start = headerEnd + 4;
-    if (buf.length < start + len) break; // 还不完整
-    const body = buf.slice(start, start + len).toString('utf8');
-    buf = buf.slice(start + len);
-    try { out.push(JSON.parse(body)); } catch { /* 坏帧跳过 */ }
+    // 跳过前导空白/换行
+    buf = buf.replace(/^[\r\n]+/, '');
+    if (!buf) break;
+
+    const headerMatch = /^Content-Length:\s*(\d+)\r?\n\r?\n/i.exec(buf);
+    if (headerMatch) {
+      const len = Number(headerMatch[1]);
+      const start = headerMatch[0].length;
+      if (buf.length < start + len) break; // 还不完整
+      const body = buf.slice(start, start + len);
+      buf = buf.slice(start + len);
+      try { out.push(JSON.parse(body)); } catch { /* 坏帧跳过 */ }
+      continue;
+    }
+
+    // 逐行 JSON：找第一个换行
+    const nl = buf.indexOf('\n');
+    if (nl === -1) break; // 未收到完整行
+    const line = buf.slice(0, nl).trim();
+    buf = buf.slice(nl + 1);
+    if (!line) continue;
+    try { out.push(JSON.parse(line)); } catch { /* 非 JSON 行忽略 */ }
   }
   return out;
 }
@@ -91,9 +103,9 @@ async function dispatchRpc(msg) {
 // ---------------------------------------------------------------- stdin 循环
 let recovered = false;
 function onData(chunk) {
-  buf = Buffer.concat([buf, chunk]);
+  buf += chunk.toString('utf8');
   if (!recovered) { recovered = true; try { recoverOrphans(); } catch { /* 忽略 */ } }
-  const messages = extractMessage();
+  const messages = extractMessages();
   for (const m of messages) {
     if (m.id === undefined && m.method && m.method.startsWith('notifications/')) continue;
     dispatchRpc(m).then((resp) => { if (resp) send(resp); }).catch(() => { /* 静默 */ });

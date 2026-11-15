@@ -41,6 +41,17 @@ export function verify(ref) {
   let needsHuman = false;
   let scopeOk = true;
 
+  // 先判任务终态：没成功跑完的任务，产物再干净也不能验收通过。
+  // 这条必须在其它检查之前——否则 failed/timeout/running 会因「HEAD 未动 + 测试过」被误判 accepted。
+  const jobStatus = job.status;
+  if (jobStatus === 'running') {
+    accepted = false;
+    reasons.push('任务仍在运行（running），不能验收');
+  } else if (jobStatus !== 'ok') {
+    accepted = false;
+    reasons.push(`任务未成功完成（status=${jobStatus || 'unknown'}），不能验收`);
+  }
+
   if (delta?.headMoved) {
     scopeOk = false;
     accepted = false;
@@ -87,6 +98,7 @@ export function verify(ref) {
     ok: true,
     job_id: job.job_id,
     task_id: job.task_id,
+    jobStatus,
     accepted,
     rejected: !accepted,
     needsHuman,

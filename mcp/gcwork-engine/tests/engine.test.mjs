@@ -14,6 +14,7 @@ import { classifyError, parseResumeAfter } from '../src/engine/errors.mjs';
 import * as codexAdapter from '../src/adapters/codex.mjs';
 import * as claudeAdapter from '../src/adapters/claude.mjs';
 import { TOOLS } from '../src/schema.mjs';
+import { verify as verifyJob, isSensitive } from '../src/verify.mjs';
 
 const FIX = resolve(join(import.meta.dirname, 'fixtures'));
 const CODEX_OK = join(FIX, 'fake_codex_full.mjs');
@@ -287,7 +288,115 @@ test('list_jobs / health 返回结构', () => {
   assert.ok(Array.isArray(list));
   const h = models.health();
   assert.ok(h.sides && h.sides.codex && h.sides.claude);
-  assert.equal(h.version, '2.1.0');
+  assert.equal(h.version, '2.1.1');
+});
+
+// ---------------------------------------------------------------- 回归：外部审计发现的 4 个 bug
+test('BUG1 回归：verify 对 failed/running 任务必须 rejected', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  for (const badStatus of ['failed', 'timeout', 'crashed', 'running', 'rejected', 'quota_exhausted']) {
+    ledger.putJob({
+      job_id: `bad-${badStatus}`, task_id: `task-${badStatus}`,
+      workdir: wd, status: badStatus, pid: null,
+      before_snapshot: snapshotToJSON(after), startedAt: new Date().toISOString(),
+    });
+    const r = verifyJob(`bad-${badStatus}`);
+    assert.equal(r.accepted, false, `${badStatus} 不应验收通过`);
+    assert.equal(r.rejected, true, `${badStatus} 应判 rejected`);
+    assert.equal(r.jobStatus, badStatus);
+  }
+});
+
+test('BUG1 回归：verify 对 ok 任务仍可 accepted', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  ledger.putJob({
+    job_id: 'good-ok', task_id: 'task-ok', workdir: wd, status: 'ok', pid: null,
+    before_snapshot: snapshotToJSON(after), startedAt: new Date().toISOString(),
+  });
+  const r = verifyJob('good-ok');
+  // 无 test 脚本 → needsHuman，但不能被 rejected
+  assert.equal(r.rejected, false, 'ok 任务不应被 rejected');
+  assert.equal(r.jobStatus, 'ok');
+});
+
+test('BUG2 回归：显式 model + reviewer 默认只读（不会被 sol 悄悄改成可写）', () => {
+  // reviewer 显式配 sol（tier=hard，原本会落到 workspace-write）
+  const t = models.pickTarget({ role: 'reviewer', model: 'sol' });
+  assert.equal(t.cli, 'codex');
+  assert.equal(t.name, 'sol');
+  assert.equal(t.sandbox, 'read-only', 'reviewer+sol 默认必须只读');
+  assert.equal(t.readOnly, true);
+  // 显式 sandbox 仍可覆盖
+  const t2 = models.pickTarget({ role: 'reviewer', model: 'sol', sandbox: 'workspace-write' });
+  assert.equal(t2.sandbox, 'workspace-write');
+  assert.equal(t2.readOnly, false);
+  // planner + 可写 tier 模型也要只读
+  const t3 = models.pickTarget({ role: 'planner', model: 'terra' });
+  assert.equal(t3.sandbox, 'read-only');
+});
+
+test('BUG3 回归：超时 job 在 status() 惰性判定为 timeout', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // 2 小时前
+  ledger.putJob({
+    job_id: 'stale-running', task_id: 'task-stale', workdir: wd, status: 'running',
+    pid: null, startedAt: old, timeoutSec: 60, runDir: mkdtempSync(join(tmpdir(), 'gcw-run-')),
+    before_snapshot: snapshotToJSON(after),
+  });
+  const r = dispatch.status('stale-running');
+  assert.equal(r.status, 'timeout', '超时的 running job 应被惰性判为 timeout');
+});
+
+test('BUG4 回归：存活 job 的写锁超 15 分钟也不被抢', async () => {
+  const home = setupEnv();
+  const wd = makeGitWorkdir();
+  const lockId = 'live-job-lock';
+  ledger.putJob({
+    job_id: lockId, task_id: 'task-live', workdir: wd, status: 'running',
+    pid: process.pid, startedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+  });
+  // 造一个「2 小时前创建」的锁文件，jobId 指向上面那个仍存活的 job
+  const { createHash } = await import('node:crypto');
+  const { join: pjoin } = await import('node:path');
+  const h = createHash('sha1').update(wd.toLowerCase()).digest('hex').slice(0, 16);
+  const lockFile = pjoin(home, 'locks', `${h}.lock`);
+  const { mkdirSync: mk } = await import('node:fs');
+  mk(pjoin(home, 'locks'), { recursive: true });
+  writeFileSync(lockFile, JSON.stringify({
+    pid: process.pid, jobId: lockId, cwd: wd,
+    startedAt: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+  }));
+  const r = await dispatch.dispatch({
+    task_id: 'should-be-busy', prompt: 'test', workdir: wd,
+    role: 'implementer', // 写任务才会抢锁
+  });
+  assert.equal(r.status, 'busy', '存活 job 的锁不能被超时抢走');
+});
+
+test('BUG5 回归：标准 MCP 客户端（逐行 JSON）能握手', async () => {
+  const { spawn } = await import('node:child_process');
+  const server = resolve(join(import.meta.dirname, '..', 'server.mjs'));
+  const p = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d) => { out += d.toString(); });
+  const init = JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'initialize',
+    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'std', version: '1' } },
+  });
+  p.stdin.write(`${init}\n`); // 关键：逐行 JSON，不是 Content-Length 帧
+  await new Promise((r) => setTimeout(r, 900));
+  p.kill();
+  const lines = out.split('\n').filter(Boolean);
+  assert.ok(lines.length >= 1, '标准客户端应收到响应（逐行 JSON）');
+  const resp = JSON.parse(lines[0]);
+  assert.equal(resp.id, 1);
+  assert.equal(resp.result.serverInfo.name, 'gcwork-engine');
 });
 
 // ---------------------------------------------------------------- 契约

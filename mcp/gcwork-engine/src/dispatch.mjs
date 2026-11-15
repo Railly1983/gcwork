@@ -9,7 +9,7 @@ import {
 import { gitSnapshot, gitDelta, snapshotToJSON, snapshotFromJSON, gitDiffText } from './engine/git.mjs';
 import { putJob, getJob, getLatestByTask, resolveRef, listJobs, pruneRuns, runsDir, locksDir, ensureDirs } from './engine/ledger.mjs';
 import {
-  spawnDetached, pidAlive, killJob, waitTerminal, markTimedOut, wasTimedOut,
+  spawnDetached, pidAlive, killJob, waitTerminal, monitor, markTimedOut, wasTimedOut,
 } from './engine/run.mjs';
 import { classifyError, parseResumeAfter } from './engine/errors.mjs';
 import { buildArgv as codexArgv, readResult as codexRead } from './adapters/codex.mjs';
@@ -89,8 +89,21 @@ function acquireLock(cwd, force) {
       if (e.code !== 'EEXIST') return { ok: false, code: 'rejected', detail: `并发锁创建失败：${e.message}` };
       let holder = null;
       try { holder = JSON.parse(readFileSync(p, 'utf8')); } catch { holder = null; }
-      const age = holder?.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
-      const stale = !holder || !pidAlive(holder.pid) || age > 15 * 60_000;
+      // 判锁是否失效：优先查台账里对应 job 是否真的还在跑（taskkill 后 pid 可能复用/宿主 pid 常驻）。
+      // 只有「找不到 job / job 已终态 / 子进程确实死了」才算 stale；单纯时间久不算。
+      const held = holder?.jobId ? getJob(holder.jobId) : null;
+      let stale;
+      if (!holder) {
+        stale = true;
+      } else if (held) {
+        // 任务还记着 running 且子进程活着 → 绝不因超时抢锁
+        const stillRunning = held.status === 'running' && held.pid && pidAlive(held.pid);
+        stale = !stillRunning;
+      } else {
+        // 台账里没有对应 job（锁是残留）→ 用 pid + 时间兜底
+        const age = holder.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
+        stale = !pidAlive(holder.pid) || age > 15 * 60_000;
+      }
       if (force || stale) {
         try { rmSync(p, { force: true }); } catch { /* 忽略 */ }
         continue;
@@ -150,7 +163,16 @@ export async function dispatch(taskInput = {}) {
     task._lockPath = lock.path;
   }
 
+  // jobId 要在 acquireLock 之后才能生成，这里提前生成以便写进锁文件
   const jobId = newJobId();
+  if (task._lockPath) {
+    try {
+      writeFileSync(task._lockPath, JSON.stringify({
+        pid: process.pid, jobId, cwd: resolve(workdir), startedAt: new Date().toISOString(),
+      }));
+    } catch { /* 锁文件更新失败不影响主流程，status 判定时按残留处理 */ }
+  }
+
   const runDir = join(runsDir(), jobId);
   mkdirSync(runDir, { recursive: true });
 
@@ -219,6 +241,23 @@ export async function dispatch(taskInput = {}) {
       }
       return toContract(finalizeFromJob(jobId));
     }
+    // 非阻塞：起后台 monitor 兜底超时（pid 存活超 timeoutSec 则杀树 + 落标记）。
+    // 即使宿主杀掉定时器，status() 里的惰性检查还会再兜一层。
+    if (pid) {
+      monitor(pid, {
+        timeoutMs: timeoutSec * 1000,
+        pollMs: 1000,
+        onTimeout: () => {
+          markTimedOut(runDir);
+          const cur = getJob(jobId);
+          if (cur && cur.status === 'running') finalize(cur);
+        },
+        onExit: () => {
+          const cur = getJob(jobId);
+          if (cur && cur.status === 'running') finalize(cur);
+        },
+      });
+    }
     return toContract(job);
   } finally {
     if (!task.blocking) { /* 非阻塞：保留 activeJobs，待 reaping 时释放 */ }
@@ -239,7 +278,18 @@ export function finalizeFromJob(jobId) {
   const job = getJob(jobId);
   if (!job) return null;
   if (isTerminal(job.status)) return job;
-  if (job.pid && pidAlive(job.pid)) return job; // 仍在跑
+
+  // 惰性超时判定：即使后台 monitor 被宿主杀掉，只要 status() 被调用，
+  // 就按 startedAt + timeoutSec 判断是否已超时，超时则杀树 + 落标记。
+  const limit = Number(job.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+  const elapsedMs = job.startedAt ? Date.now() - Date.parse(job.startedAt) : 0;
+  if (elapsedMs >= limit * 1000) {
+    if (job.pid && pidAlive(job.pid)) killJob(job.pid);
+    markTimedOut(job.runDir); // 超时事实成立，无论 pid 是否还活着
+    return finalize(job);
+  }
+
+  if (job.pid && pidAlive(job.pid)) return job; // 仍在跑且未超时
   return finalize(job);
 }
 

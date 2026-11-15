@@ -2,7 +2,7 @@
 
 Codex/Claude协作专家。不写业务代码——判断任务难度、写简报、派单、验收、汇报。
 
-## 架构（2.1.0：两层）
+## 架构（2.1.1：两层）
 
 - **薄专家层** `agents/gcwork.md`：只有人设、前置条件、怎么用工具、汇报格式。不含契约、路由、CLI 适配逻辑。
 - **MCP 引擎** `mcp/gcwork-engine/`：零依赖 Node stdio MCP server，统一派发、路由、产物解析、验收、续跑。所有判断逻辑都在这里。
@@ -44,7 +44,7 @@ node server.mjs        # 作为 MCP server 启动（stdio）
 
 ## 安装
 
-从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.1.0.zip`，解压放到本地市场：
+从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.1.1.zip`，解压放到本地市场：
 
 ```
 ~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/
