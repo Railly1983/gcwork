@@ -1,7 +1,7 @@
 // gcwork-engine 单元测试 + e2e（fake CLI）。运行：node --test tests/engine.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, existsSync, rmSync, readFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, rmSync, readFileSync, utimesSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execSync } from 'node:child_process';
@@ -522,6 +522,167 @@ test('BUG5b 回归：Content-Length 帧 + 中文 + 分片 都能正确解析', a
   const resp = JSON.parse(lines[0]);
   assert.equal(resp.id, 7);
   assert.equal(resp.result.serverInfo.name, 'gcwork-engine');
+});
+
+test('BUG-C 回归：Claude is_error=true 带文字时判失败，不是 ok', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  writeFileSync(join(runDir, 'stdout.log'), JSON.stringify({
+    result: 'authentication failed', is_error: true, usage: {},
+  }));
+  ledger.putJob({
+    job_id: 'claude-err', task_id: 'tce', workdir: wd, status: 'running',
+    pid: 999999, executor: 'claude', startedAt: new Date().toISOString(),
+    timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
+  });
+  const r = dispatch.status('claude-err');
+  assert.notEqual(r.status, 'ok', 'Claude 报错带文字不能判成功');
+  assert.ok(['rejected', 'failed', 'quota_exhausted'].includes(r.status), `实际 ${r.status}`);
+});
+
+test('BUG-D 回归：Codex turn.failed 带部分回答时判失败', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  writeFileSync(join(runDir, 'stdout.log'), [
+    '{"type":"item.completed","item":{"type":"agent_message","text":"我先看了一下代码"}}',
+    '{"type":"turn.failed","error":{"message":"quota exceeded"}}',
+  ].join('\n') + '\n');
+  ledger.putJob({
+    job_id: 'codex-partial-fail', task_id: 'tcp', workdir: wd, status: 'running',
+    pid: 999999, executor: 'codex', startedAt: new Date().toISOString(),
+    timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
+  });
+  const r = dispatch.status('codex-partial-fail');
+  assert.notEqual(r.status, 'ok', 'Codex 失败带部分回答不能判成功');
+  assert.ok(r.partialOutput && r.partialOutput.length > 0, '失败也要给 partialOutput');
+});
+
+test('BUG-E 回归：ping 返回空 result，未知方法回 -32601', async () => {
+  const { spawn } = await import('node:child_process');
+  const server = resolve(join(import.meta.dirname, '..', 'server.mjs'));
+  const p = spawn(process.execPath, [server], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '';
+  p.stdout.on('data', (d) => { out += d.toString(); });
+  const w = (o) => p.stdin.write(JSON.stringify(o) + '\n');
+  w({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 't', version: '1' } } });
+  w({ jsonrpc: '2.0', id: 2, method: 'ping' });
+  w({ jsonrpc: '2.0', id: 3, method: 'no/such/method' });
+  w({ jsonrpc: '2.0', method: 'notifications/initialized' }); // 通知，不应有响应
+  await new Promise((r) => setTimeout(r, 900));
+  p.kill();
+
+  const lines = out.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const ping = lines.find((m) => m.id === 2);
+  const unknown = lines.find((m) => m.id === 3);
+  assert.ok(ping, 'ping 必须有响应');
+  assert.deepEqual(ping.result, {}, 'ping 应返回空 result');
+  assert.ok(unknown, '未知方法必须有响应');
+  assert.equal(unknown.error.code, -32601, '未知方法应回 -32601');
+  assert.equal(lines.filter((m) => m.id === undefined).length, 0, '通知不应有响应');
+});
+
+test('BUG-F 回归：force 也不能抢活着的任务锁', async () => {
+  const home = setupEnv();
+  const wd = makeGitWorkdir();
+  const { spawn } = await import('node:child_process');
+  const sleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{},600000)'], { stdio: 'ignore' });
+  const { createHash } = await import('node:crypto');
+  const { mkdirSync: mk } = await import('node:fs');
+  const h = createHash('sha1').update(wd.toLowerCase()).digest('hex').slice(0, 16);
+  mk(join(home, 'locks'), { recursive: true });
+  const lockFile = join(home, 'locks', `${h}.lock`);
+  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, jobId: 'alive-job', cwd: wd, startedAt: new Date().toISOString() }));
+  ledger.putJob({
+    job_id: 'alive-job', task_id: 'ta', workdir: wd, status: 'running',
+    pid: sleeper.pid, startedAt: new Date().toISOString(),
+  });
+  // 即使 force:true，也不许抢活着的任务
+  const r = await dispatch.dispatch({
+    task_id: 'force-attempt', prompt: 'x', workdir: wd, role: 'implementer', force: true,
+  });
+  assert.equal(r.status, 'busy', 'force 不能抢活锁');
+  try { sleeper.kill(); } catch {}
+});
+
+test('BUG-G 回归：finalize 终态与 lockHeld 一次性发布（无中间窗口）', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const { spawn } = import('node:child_process');
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  const job = {
+    job_id: 'atomic-final', task_id: 'taf', workdir: wd, status: 'running',
+    pid: null, startedAt: new Date().toISOString(), timeoutSec: 600, runDir,
+    executor: 'codex', lockPath: null, before_snapshot: snapshotToJSON(after),
+  };
+  ledger.putJob(job);
+  const out = dispatch.finalize(job);
+  assert.equal(out.lockHeld, false, '进程已退出时 lockHeld 应为 false');
+  // 台账里必须已经是最终形态，不存在「终态但缺 lockHeld」的中间版本
+  const persisted = ledger.getJob('atomic-final');
+  assert.equal(persisted.status, out.status);
+  assert.equal(persisted.lockHeld, false, '台账终态必须同时含 lockHeld');
+});
+
+test('BUG-H 回归：内容变了但行数不变，也要检出（密钥被换行数相同）', () => {
+  const wd = makeGitWorkdir();
+  const f = join(wd, '.env');
+  writeFileSync(f, 'API_KEY=old\n');
+  const before = gitSnapshot(wd);
+  writeFileSync(f, 'API_KEY=new\n'); // 行数、状态、numstat 全不变
+  const after = gitSnapshot(wd);
+  const d = gitDelta(before, after);
+  assert.ok(d.paths.includes('.env'), '换掉同长度密钥必须被检出');
+  assert.equal(d.stats.modified, 1);
+});
+
+test('BUG-I 回归：未跟踪目录要展开到文件级（.github/workflows 不能漏）', () => {
+  const wd = makeGitWorkdir();
+  const before = gitSnapshot(wd);
+  const dir = join(wd, '.github', 'workflows');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'ci.yml'), 'on: push\n');
+  const after = gitSnapshot(wd);
+  const d = gitDelta(before, after);
+  assert.ok(
+    d.paths.some((p) => p.replace(/\\/g, '/').includes('.github/workflows/ci.yml')),
+    `应展开到文件级，实际：${JSON.stringify(d.paths)}`,
+  );
+  assert.ok(isSensitive(d.paths.find((p) => p.includes('ci.yml'))), '应命中敏感规则');
+});
+
+test('BUG-J 回归：台账写入是原子的（不产生半截 JSON）', () => {
+  setupEnv();
+  const job = { job_id: 'atomic-w', task_id: 'tw', status: 'running', workdir: '/tmp' };
+  ledger.putJob(job);
+  const rec = ledger.getJobStatus('atomic-w');
+  assert.equal(rec.state, 'ok');
+  assert.equal(rec.job.task_id, 'tw');
+  // 覆盖写同样要原子
+  ledger.putJob({ ...job, status: 'ok' });
+  assert.equal(ledger.getJobStatus('atomic-w').job.status, 'ok');
+  // 不存在的要能区分出来
+  assert.equal(ledger.getJobStatus('nope').state, 'missing');
+});
+
+test('BUG-K 回归：台账损坏时不判 stale（不能凭坏文件抢锁）', async () => {
+  const home = setupEnv();
+  const wd = makeGitWorkdir();
+  const { createHash } = await import('node:crypto');
+  const h = createHash('sha1').update(wd.toLowerCase()).digest('hex').slice(0, 16);
+  mkdirSync(join(home, 'locks'), { recursive: true });
+  const lockFile = join(home, 'locks', `${h}.lock`);
+  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, jobId: 'corrupt-job', cwd: wd, startedAt: new Date().toISOString() }));
+  // 造一个损坏的台账文件
+  mkdirSync(join(home, 'ledger'), { recursive: true });
+  writeFileSync(join(home, 'ledger', 'corrupt-job.json'), '{ 这不是合法 JSON ');
+  assert.equal(ledger.getJobStatus('corrupt-job').state, 'corrupt');
+  const r = await dispatch.dispatch({ task_id: 'x', prompt: 'p', workdir: wd, role: 'implementer' });
+  assert.equal(r.status, 'busy', '台账损坏时不能抢锁');
 });
 
 // ---------------------------------------------------------------- 契约

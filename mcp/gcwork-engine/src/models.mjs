@@ -31,9 +31,6 @@ export const ROLE_PROFILE = {
   reviewer: { task_type: 'review', need_write: false, defaultEffort: 'medium', sandbox: 'read-only', codex: 'astra', claude: 'fable' },
 };
 
-// 只有这几类失败值得换边重试（tier 模式下）。TIMEOUT / FAILED 换边等于再烧一次。
-export const FALLBACK_CODES = new Set(['NOT_FOUND', 'AUTH', 'QUOTA', 'MODEL_UNAVAILABLE']);
-
 const BILLING_ENV = {
   claude: ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX'],
   codex: ['OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL'],
@@ -149,7 +146,7 @@ function readCatalogs() {
     .map((n) => {
       const p = join(dir, n);
       try {
-        return { p, mtime: fs.statSync(p).mtimeMs };
+        return { p, mtime: statSync(p).mtimeMs };
       } catch {
         return null;
       }
@@ -160,7 +157,7 @@ function readCatalogs() {
   const out = [];
   for (const f of files) {
     try {
-      const cat = JSON.parse(fs.readFileSync(f.p, 'utf8'));
+      const cat = JSON.parse(readFileSync(f.p, 'utf8'));
       const mlist = (cat.models || []).filter((m) => m && m.slug && m.visibility === 'list');
       if (mlist.length) out.push({ file: f.p, canonical: basename(f.p) === 'models_cache.json', models: mlist });
     } catch { /* 坏文件跳过 */ }
@@ -293,8 +290,7 @@ export function findCodexEntry() {
   const cands = [join(dirname(process.execPath), 'node_modules', '@openai', 'codex', 'bin', 'codex.js')];
   const versions = join(homedir(), '.workbuddy', 'binaries', 'node', 'versions');
   try {
-    const fs = require('node:fs');
-    for (const v of fs.readdirSync(versions)) {
+    for (const v of readdirSync(versions)) {
       cands.push(join(versions, v, 'node_modules', '@openai', 'codex', 'bin', 'codex.js'));
     }
   } catch { /* 无该目录 */ }

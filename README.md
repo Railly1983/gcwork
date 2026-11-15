@@ -80,7 +80,7 @@ mcp/gcwork-engine/
     engine/ledger.mjs               任务台账持久化
     engine/run.mjs                  detached 子进程 + pid 轮询 + 超时杀树
     engine/errors.mjs               错误分类 + quota 恢复时间解析
-tests/engine.test.mjs              34 项单元 + e2e 测试（node --test，不烧额度）
+tests/engine.test.mjs              54 项单元 + e2e 测试（node --test，不烧额度）
 avatars/expert.png                 专家头像
 LICENSE / CHANGELOG.md
 ```

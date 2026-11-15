@@ -20,8 +20,8 @@
     "zh": "Codex/Claude协作专家"
   },
   "displayDescription": {
-    "en": "Plug your Codex and Claude into WorkBuddy — talk naturally, the engine routes, verifies, and resumes across a detached process.",
-    "zh": "将 Codex 与 Claude 接入 WorkBuddy，自然语言派单；引擎统一路由、验收、续跑，detached 进程抗宿主超时。"
+    "en": "Plug Codex and Claude into WorkBuddy: natural-language dispatch, with routing, verification and resume handled by the engine.",
+    "zh": "把 Codex 与 Claude 接进 WorkBuddy，自然语言派单，引擎负责路由、验收与续跑。"
   },
   "avatar": "avatars/expert.png",
   "categoryId": "02-Engineering",
@@ -34,10 +34,7 @@
     "coding-agent",
     "mcp"
   ],
-  "homepage": {
-    "type": "github",
-    "url": "https://github.com/Railly1983/gcwork"
-  },
+  "homepage": "https://github.com/Railly1983/gcwork",
   "defaultInitPrompt": {
     "zh": "先帮我看看现在能不能用：Codex 和 Claude 都装好、登上了吗？各自有哪些模型和思考强度可选，你那套预设规则是怎么配的？",
     "en": "First, check whether things actually work: are Codex and Claude installed and logged in? What models and reasoning levels does each have, and how are the preset rules set up?"

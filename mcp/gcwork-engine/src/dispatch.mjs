@@ -1,13 +1,13 @@
 // 派发编排：dispatch / status / resume / 验收封装 / listJobs / recoverOrphans。
 // 核心职责：统一契约、detached 执行抗宿主超时、半自动续跑、产物解析、并发与写锁。
 import { randomUUID, createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from 'node:fs';
-import { isAbsolute, join, resolve, basename } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, renameSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import {
-  pickTarget, resolveModel, findCodexEntry, findClaudeEntry, billingWarningFor, childEnv, TOOL_VERSION, MODELS,
+  pickTarget, resolveModel, findCodexEntry, findClaudeEntry, billingWarningFor, childEnv, MODELS,
 } from './models.mjs';
 import { gitSnapshot, gitDelta, snapshotToJSON, snapshotFromJSON, gitDiffText } from './engine/git.mjs';
-import { putJob, getJob, getLatestByTask, resolveRef, listJobs, pruneRuns, runsDir, locksDir, ensureDirs } from './engine/ledger.mjs';
+import { putJob, getJob, getJobStatus, getLatestByTask, resolveRef, listJobs, pruneRuns, runsDir, locksDir, ensureDirs } from './engine/ledger.mjs';
 import {
   spawnDetached, pidAlive, killJob, waitTerminal, monitor, markTimedOut, wasTimedOut,
 } from './engine/run.mjs';
@@ -90,11 +90,14 @@ function acquireLock(cwd, force) {
       let holder = null;
       try { holder = JSON.parse(readFileSync(p, 'utf8')); } catch { holder = null; }
       // 判锁是否失效：优先查台账里对应 job 是否真的还在跑（taskkill 后 pid 可能复用/宿主 pid 常驻）。
-      // 只有「找不到 job / job 已终态 / 子进程确实死了」才算 stale；单纯时间久不算。
-      const held = holder?.jobId ? getJob(holder.jobId) : null;
+      // 台账读坏了不代表任务死了 —— 那种情况一律按「占用中」处理，宁可让用户重试。
+      const rec = holder?.jobId ? getJobStatus(holder.jobId) : { state: 'missing', job: null };
+      const held = rec.job;
       let stale;
       if (!holder) {
         stale = true;
+      } else if (rec.state === 'corrupt') {
+        stale = false; // 台账损坏：无法证明任务已死，禁止抢锁
       } else if (held) {
         // 两种情况锁必须保留：
         // 1) 任务仍 running 且子进程活着；
@@ -107,29 +110,52 @@ function acquireLock(cwd, force) {
         const age = holder.startedAt ? Date.now() - Date.parse(holder.startedAt) : Infinity;
         stale = !pidAlive(holder.pid) || age > 15 * 60_000;
       }
-      if (force || stale) {
-        try { rmSync(p, { force: true }); } catch { /* 忽略 */ }
+      // force 只允许清理「确认已死」的锁，不能抢活着的任务——
+      // 那等于主动制造同目录并发写。活锁只能等它结束。
+      const holderAlive = Boolean(holder && holder.pid && pidAlive(holder.pid));
+      const forceable = force && stale && !(held && held.pid && pidAlive(held.pid));
+      if (forceable || stale) {
+        // 删除前再确认一次持有者仍是同一个，缩小读-删之间的竞争窗口
+        let same = true;
+        try {
+          const now = JSON.parse(readFileSync(p, 'utf8'));
+          same = !holder || !now || now.jobId === holder.jobId;
+        } catch { same = false; }
+        if (same) { try { rmSync(p, { force: true }); } catch { /* 忽略 */ } }
         continue;
       }
-      return { ok: false, code: 'busy', detail: `同一目录已有写入任务（${holder?.jobId || '?'}），等它结束或确认死锁后重试` };
+      const whyAlive = holderAlive ? '进程仍在运行' : '锁仍有效';
+      return { ok: false, code: 'busy', detail: `同一目录已有写入任务（${holder?.jobId || '?'}，${whyAlive}），等它结束后再试` };
     }
   }
   return { ok: false, code: 'busy', detail: '并发锁获取失败，重试后仍被占用' };
 }
 
 /**
- * 释放写锁。传入 jobId 时校验归属：只有锁文件里记的还是自己才删，
- * 避免旧任务的 monitor 收尾时误删新任务刚拿到的同路径锁。
+ * 释放写锁。传入 jobId 时校验归属：只有锁文件里记的还是自己才删。
+ *
+ * 用 rename 到临时名再删，而不是「读 → 判断 → 删」：
+ * rename 在同一个目录内是原子的，抢到改名权的那一方才真正持有删除资格，
+ * 避免旧 finalizer 在别人刚接手锁之后把新锁删掉。
  */
 function releaseLock(p, jobId = null) {
   if (!p) return;
-  if (jobId) {
-    try {
-      const holder = JSON.parse(readFileSync(p, 'utf8'));
-      if (holder && holder.jobId && holder.jobId !== jobId) return; // 锁已易主，不删
-    } catch { /* 读不到就当自己的，继续删 */ }
+  const tmp = `${p}.release-${process.pid}-${Date.now()}`;
+  try {
+    renameSync(p, tmp);
+  } catch {
+    return; // 已被别人移走/不存在
   }
-  try { rmSync(p, { force: true }); } catch { /* 忽略 */ }
+  if (jobId) {
+    let owner = null;
+    try { owner = JSON.parse(readFileSync(tmp, 'utf8')); } catch { owner = null; }
+    if (owner && owner.jobId && owner.jobId !== jobId) {
+      // 移走的是别人的锁：尽力放回原位，避免误伤
+      try { renameSync(tmp, p); } catch { /* 放不回就只能删，不阻塞 */ }
+      return;
+    }
+  }
+  try { rmSync(tmp, { force: true }); } catch { /* 忽略 */ }
 }
 
 // ---------------------------------------------------------------- 派发
@@ -209,7 +235,7 @@ export async function dispatch(taskInput = {}) {
 
   const stdoutPath = join(runDir, 'stdout.log');
   const stderrPath = join(runDir, 'stderr.log');
-  const { pid } = spawnDetached(argv, {
+  const { pid, spawnError } = spawnDetached(argv, {
     cwd: workdir, env: childEnv(task.env || 'inherit'), stdoutPath, stderrPath, stdinText,
   });
 
@@ -236,6 +262,7 @@ export async function dispatch(taskInput = {}) {
     pid: pid || null,
     startedAt,
     timeoutSec,
+    envMode: task.env || 'inherit',
     blocking: Boolean(task.blocking),
     billingWarning: billingWarningFor(target.cli),
     before_snapshot: snapshotToJSON(before),
@@ -244,6 +271,12 @@ export async function dispatch(taskInput = {}) {
   };
   putJob(job);
   activeJobs.add(jobId);
+
+  // 启动就失败（找不到 CLI 可执行文件等）：立即形成明确终态，不进入等待。
+  if (!pid && spawnError) {
+    try { writeFileSync(stderrPath, `[spawn failed] ${spawnError}\n`, 'utf8'); } catch { /* 忽略 */ }
+    return toContract(finalize(getJob(jobId)));
+  }
 
   try {
     if (task.blocking) {
@@ -272,8 +305,11 @@ export async function dispatch(taskInput = {}) {
       });
     }
     return toContract(job);
-  } finally {
-    if (!task.blocking) { /* 非阻塞：保留 activeJobs，待 reaping 时释放 */ }
+  } catch (e) {
+    // 派发过程抛错也要有明确终态，不能留下永远 running 的台账
+    const cur = getJob(jobId);
+    if (cur && cur.status === 'running') finalize(cur);
+    throw e;
   }
 }
 
@@ -350,15 +386,16 @@ export function finalize(job) {
   const combined = `${stderr}\n${stdout}`;
   const hasMessage = Boolean(message && message.trim());
 
+  // 判定顺序：失败信号优先于「有回答文字」。
+  // CLI 报错时往往也会输出一段说明文字，若先看 hasMessage 就会把失败误判成 ok。
   let status;
   if (timedOut) {
     status = 'timeout';
+  } else if (cliError) {
+    // Claude is_error / Codex turn.failed 都归到这里；错误文本进 partialOutput。
+    status = mapRuntimeError(cliError);
   } else if (hasMessage) {
     status = 'ok';
-  } else if (job.executor === 'codex' && cliError) {
-    status = mapRuntimeError(cliError);
-  } else if (job.executor === 'claude' && cliError) {
-    status = mapRuntimeError(cliError);
   } else if (!stdout.trim() && !stderr.trim()) {
     status = 'crashed'; // 进程死了、什么都没留下
   } else {
@@ -418,18 +455,23 @@ export function finalize(job) {
       result_path: join(runDir, 'result.json'),
     },
   };
-  putJob(updated);
-  activeJobs.delete(job.job_id);
 
-  // 写锁释放条件：只有确认子进程已退出才释放。
-  // 若超时收尾时进程还活着（kill 失败），必须保留锁——否则第二单会进来，同目录并发写。
+  // 写锁去留必须在写入台账之前算好，一次性发布终态。
+  // 分两次写（先终态、后补 lockHeld）会留出抢锁窗口：新任务看到「timeout 且未持锁」就进来了。
   const stillAlive = Boolean(job.pid && pidAlive(job.pid));
   if (stillAlive) {
     updated.lockHeld = true;
     updated.git_warning = [updated.git_warning, '子进程未能终止，写锁保留，勿在相同目录派新写任务']
       .filter(Boolean).join('；');
-    putJob(updated);
   } else {
+    updated.lockHeld = false;
+  }
+
+  putJob(updated);
+  activeJobs.delete(job.job_id);
+
+  // 只有确认进程已退出才释放锁；还活着就留着，防止同目录并发写。
+  if (!stillAlive) {
     releaseLock(job.lockPath, job.job_id); // 带 jobId 校验归属，防误删新任务的锁
   }
   return updated;
@@ -466,19 +508,30 @@ export function listJobsTool(limit = 20) {
  * 仅当上次为终态失败（非 ok）时重派；busy/running 直接返回当前，不重派。
  */
 export async function resume(taskInput = {}) {
-  const { task_id, blocking = false, timeout_sec = null, env = 'inherit', force = false } = taskInput;
+  const { task_id, blocking = false, timeout_sec = null, env = null, force = false } = taskInput;
   if (!task_id) return { status: 'rejected', error: 'BAD_ARGS', detail: '缺少 task_id' };
 
-  const latest = getLatestByTask(task_id);
-  if (!latest) return { status: 'rejected', error: 'NO_JOB_TO_RESUME', detail: `没有可续跑的 task_id=${task_id}` };
+  const raw = getLatestByTask(task_id);
+  if (!raw) return { status: 'rejected', error: 'NO_JOB_TO_RESUME', detail: `没有可续跑的 task_id=${task_id}` };
+
+  // 先刷新状态：台账可能还记着 running，但进程其实早就死了。
+  // 不刷新会把「已失败的旧任务」当成还在跑，直接原样返回，续跑永远发不出去。
+  const latest = finalizeFromJob(raw.job_id) || raw;
+
   if (latest.status === 'ok') return { status: 'ok', detail: '上次已成功，无需续跑', task_id };
   if (latest.status === 'running' || latest.status === 'busy') {
-    return toContract(latest); // 还在跑，别重复派
+    return toContract(latest); // 确实还在跑，别重复派
   }
 
   // 重建原始任务配置 + 追加续跑上下文
   const changed = (latest.changed_files || []).join('、') || '（无文件改动）';
-  const handoff = `\n\n[续跑上下文] 上一轮状态：${latest.status}；已改动文件：${changed}。请接着做，不要重复已完成的部分。`;
+  const why = latest.status
+    ? `上一轮状态：${latest.status}${latest.summary ? `（${latest.summary}）` : ''}`
+    : '上一轮状态未知';
+  const partial = latest.partialOutput
+    ? `\n上一轮部分结果（供参考，可能不完整）：\n${String(latest.partialOutput).slice(0, 1000)}`
+    : '';
+  const handoff = `\n\n[续跑上下文] ${why}；已改动文件：${changed}。${partial}\n请接着做，不要重复已完成的部分。`;
   const prompt = String(latest.prompt || '') + handoff;
 
   const resumedTask = {
@@ -491,8 +544,9 @@ export async function resume(taskInput = {}) {
     workdir: latest.workdir,
     prompt,
     blocking,
-    timeout_sec,
-    env,
+    // 未显式传时继承上一轮的约束，否则会悄悄变成默认 30 分钟 / inherit
+    timeout_sec: timeout_sec ?? latest.timeoutSec ?? null,
+    env: env ?? (latest.envMode || 'inherit'),
     force,
   };
   return dispatch(resumedTask);

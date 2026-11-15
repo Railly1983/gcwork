@@ -1,24 +1,57 @@
 // 子进程管理：detached 脱离宿主/Agent 轮次上限独立运行；pid 轮询判断生死（Windows 下
 // unref 的 detached 子进程不一定回调 exit，故用 pid-poll）。超时杀树 + 落 timeout 标记。
 import { spawn, spawnSync } from 'node:child_process';
-import { openSync, writeFileSync, existsSync } from 'node:fs';
+import { openSync, closeSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
  * 以 detached 方式启动子进程，stdout/stderr 重定向到文件，unref 脱离本进程。
  * 这样即使宿主/Agent 轮次到点，长任务也能继续跑完。
- * @returns {{pid:number|null}}
+ *
+ * 启动失败（ENOENT 等）不在这里抛出，而是通过返回的 spawnError 交给调用方处理：
+ * 监听 child 的 error 事件，否则会成为未捕获异常并泄漏 fd。
+ * @returns {{pid:number|null, spawnError:string|null}}
  */
 export function spawnDetached(argv, { cwd, env, stdoutPath, stderrPath, stdinText = null }) {
-  const out = openSync(stdoutPath, 'w');
-  const err = openSync(stderrPath, 'w');
-  const child = spawn(argv[0], argv.slice(1), {
-    cwd,
-    env,
-    stdio: ['pipe', out, err],
-    detached: true,
-    windowsHide: true,
+  let out = null;
+  let err = null;
+  try {
+    out = openSync(stdoutPath, 'w');
+    err = openSync(stderrPath, 'w');
+  } catch (e) {
+    if (out !== null) { try { closeSync(out); } catch { /* 忽略 */ } }
+    if (err !== null) { try { closeSync(err); } catch { /* 忽略 */ } }
+    return { pid: null, spawnError: `打开输出文件失败：${e && e.message}` };
+  }
+
+  let child;
+  let spawnError = null;
+  try {
+    child = spawn(argv[0], argv.slice(1), {
+      cwd,
+      env,
+      stdio: ['pipe', out, err],
+      detached: true,
+      windowsHide: true,
+    });
+  } catch (e) {
+    spawnError = String(e && e.message || e);
+  } finally {
+    // 父进程侧句柄用完即关：子进程已复制自己的 fd，不关会一直泄漏。
+    try { closeSync(out); } catch { /* 忽略 */ }
+    try { closeSync(err); } catch { /* 忽略 */ }
+  }
+
+  if (!child) return { pid: null, spawnError: spawnError || '子进程创建失败' };
+
+  // 异步启动失败（ENOENT/EACCES）走 error 事件，必须接管，否则进程会崩。
+  child.on('error', (e) => {
+    spawnError = String(e && e.message || e);
+    try {
+      writeFileSync(stderrPath, `[spawn failed] ${spawnError}\n`, 'utf8');
+    } catch { /* 忽略 */ }
   });
+
   // 若有 stdin（codex 的 `-` 提示），写入后关闭
   if (stdinText != null) {
     try {
@@ -26,10 +59,11 @@ export function spawnDetached(argv, { cwd, env, stdoutPath, stderrPath, stdinTex
       child.stdin.end();
     } catch { /* 子进程可能已退出 */ }
   } else if (child.stdin) {
-    child.stdin.end();
+    try { child.stdin.end(); } catch { /* 忽略 */ }
   }
   child.unref();
-  return { pid: child.pid };
+
+  return { pid: child.pid || null, spawnError };
 }
 
 /** pid 是否还活着（用于跨进程存活判断）。 */

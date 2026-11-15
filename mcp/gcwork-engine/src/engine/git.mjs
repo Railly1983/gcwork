@@ -1,5 +1,27 @@
 // git 快照与变更计算（纯函数为主，便于测试）。从 2.0.2 移植。
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+const HASH_LIMIT = 2 * 1024 * 1024; // 超过 2MB 的文件只记大小，避免快照拖慢派单
+
+/**
+ * 文件内容指纹：size + 内容 sha1 前 16 位。
+ * 只看 numstat 行数是不够的——改一行密钥、行数不变，就会被判成没变化。
+ */
+function fingerprint(cwd, rel) {
+  try {
+    const p = join(cwd, rel);
+    const st = statSync(p);
+    if (!st.isFile()) return { size: null, hash: null };
+    if (st.size > HASH_LIMIT) return { size: st.size, hash: null };
+    const buf = readFileSync(p);
+    return { size: st.size, hash: createHash('sha1').update(buf).digest('hex').slice(0, 16) };
+  } catch {
+    return { size: null, hash: null }; // 已删除或不可读
+  }
+}
 
 /**
  * 对 cwd 做一次 git 快照：是否 git 仓库、HEAD、工作区文件状态与 numstat。
@@ -16,14 +38,18 @@ export function gitSnapshot(cwd) {
   const head = headR && headR.status === 0 ? String(headR.stdout).trim() : null;
 
   const files = new Map();
-  const st = run(['status', '--porcelain=v1', '-z'], 'buffer');
+  // -uall 必须带：否则未跟踪目录只回一个 `?? .github/`，
+  // 里面的 .github/workflows/*.yml 不会出现在清单里，敏感文件检查就漏了。
+  const st = run(['status', '--porcelain=v1', '-z', '-uall'], 'buffer');
   if (st && st.status === 0 && st.stdout) {
     const parts = st.stdout.toString('utf8').split('\0');
     for (let i = 0; i < parts.length; i += 1) {
       const s = parts[i];
       if (!s || s.length < 4) continue;
       const xy = s.slice(0, 2);
-      files.set(s.slice(3), { xy, added: null, removed: null });
+      const rel = s.slice(3);
+      const fp = fingerprint(cwd, rel);
+      files.set(rel, { xy, added: null, removed: null, size: fp.size, hash: fp.hash });
       if (xy[0] === 'R' || xy[0] === 'C') i += 1; // rename/copy 有第二个路径段
     }
   }
@@ -79,7 +105,13 @@ export function gitDelta(before, after) {
     } else if (b && !a) {
       changed.push(p);
       stats.deleted += 1;
-    } else if (b && a && (b.xy !== a.xy || b.added !== a.added || b.removed !== a.removed)) {
+    } else if (b && a && (
+      b.xy !== a.xy
+      || b.added !== a.added
+      || b.removed !== a.removed
+      || b.size !== a.size        // 行数相同但内容换了，靠大小/指纹兜住
+      || b.hash !== a.hash
+    )) {
       changed.push(p);
       stats.modified += 1;
     }

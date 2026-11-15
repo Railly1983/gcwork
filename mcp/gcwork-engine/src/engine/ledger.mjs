@@ -1,7 +1,7 @@
 // 任务台账持久化：task_id → job 记录（含状态/产物路径/已改文件/partialOutput）。落盘 JSON。
 // GCWORK_HOME 可被覆盖，便于测试隔离。
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, renameSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -24,10 +24,17 @@ function ledgerPath(jobId) {
   return join(ledgerDir(), `${jobId}.json`);
 }
 
-/** 写入（或覆盖）一条 job 记录。 */
+/**
+ * 写入（或覆盖）一条 job 记录。
+ * 先写临时文件再 rename 覆盖：直接覆盖时如果进程在写一半被中断，
+ * 会留下半截 JSON，后续读取失败就会被当成「任务不存在」，进而误判可抢锁。
+ */
 export function putJob(job) {
   ensureDirs();
-  writeFileSync(ledgerPath(job.job_id), `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+  const target = ledgerPath(job.job_id);
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+  renameSync(tmp, target);
   return job;
 }
 
@@ -38,7 +45,23 @@ export function getJob(jobId) {
   try {
     return JSON.parse(readFileSync(p, 'utf8'));
   } catch {
+    // 文件在但读坏了：这跟「不存在」不是一回事。调用方不能据此判定任务已死。
+    // 这里仍返回 null（接口兼容），但另提供 getJobStatus 供需要区分的地方使用。
     return null;
+  }
+}
+
+/**
+ * 区分「记录不存在」与「记录损坏」。
+ * @returns {{state:'missing'|'corrupt'|'ok', job:object|null}}
+ */
+export function getJobStatus(jobId) {
+  const p = ledgerPath(jobId);
+  if (!existsSync(p)) return { state: 'missing', job: null };
+  try {
+    return { state: 'ok', job: JSON.parse(readFileSync(p, 'utf8')) };
+  } catch {
+    return { state: 'corrupt', job: null };
   }
 }
 

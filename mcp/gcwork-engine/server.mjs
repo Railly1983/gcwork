@@ -77,6 +77,11 @@ async function dispatchRpc(msg) {
     };
   }
 
+  // MCP 标准的健康检查：必须及时返回空结果，否则客户端可能判连接死亡。
+  if (method === 'ping') {
+    return { jsonrpc: '2.0', id, result: {} };
+  }
+
   if (method === 'tools/list') {
     return { jsonrpc: '2.0', id, result: { tools: TOOLS } };
   }
@@ -107,8 +112,13 @@ async function dispatchRpc(msg) {
     }
   }
 
-  // 其它方法（如 notifications）忽略
-  return null;
+  // 通知类（无 id）不响应；有 id 的未知方法按 JSON-RPC 规范回 -32601。
+  if (id === undefined || id === null) return null;
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: { code: -32601, message: `Method not found: ${method}` },
+  };
 }
 
 // ---------------------------------------------------------------- stdin 循环
@@ -127,6 +137,10 @@ process.stdin.on('data', onData);
 process.stdin.on('end', () => { /* 客户端断开 */ });
 process.stdin.resume();
 
-// 防止未捕获异常导致进程静默退出
-process.on('uncaughtException', () => { /* 吞掉，保持 server 存活 */ });
-process.on('unhandledRejection', () => { /* 吞掉 */ });
+// 兜底：不让未捕获异常杀掉 server，但要留痕，否则故障不可见。
+process.on('uncaughtException', (e) => {
+  try { process.stderr.write(`[gcwork-engine] uncaughtException: ${e && e.stack || e}\n`); } catch { /* 忽略 */ }
+});
+process.on('unhandledRejection', (e) => {
+  try { process.stderr.write(`[gcwork-engine] unhandledRejection: ${e && e.stack || e}\n`); } catch { /* 忽略 */ }
+});
