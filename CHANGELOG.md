@@ -2,7 +2,52 @@
 
 ## 2.2.0 — 2026-11-16
 
-**派单通道从「每单起一个 codex exec 进程」换成「常驻 codex app-server」。**
+**去掉 MCP，改成命令行 + Bash 调用；codex 执行通道换成官方 app-server。**
+
+### 为什么去掉 MCP
+
+插件包里的 `.mcp.json` 写 `command: "node"` 和 `${CODEBUDDY_PLUGIN_ROOT}`，但宿主把配置复制到用户 `~/.workbuddy/mcp.json` 时不替换这个变量，`cwd` 成了字面量路径。Windows 上 spawn 的 cwd 不存在时报的是 `ENOENT`（看起来像找不到 node.exe，实际 node 完好），连接器因此永远连不上。
+
+对比机器上能连通的三个 server（rea / smartbi / meetingstone），全是写死的绝对路径——说明本机 stdio 这条路要求绝对路径，而插件分发的形态给不出绝对路径。
+
+改成用 Bash 直接调 `cli.mjs`：不依赖宿主任何配置，不会因为连不上而失效。
+
+### 为什么换 app-server
+
+`codex exec` 每单起一个新进程，光启动 2–5 秒，中间没有进度。`codex app-server` 是官方常驻 JSON-RPC 服务，`thread/start` → `turn/start`，受理在毫秒级，过程有通知流。
+
+实测（codex-cli 0.166.0）：
+
+| 环节 | 改造前 | 改造后 |
+|---|---:|---:|
+| 派单回执 | 5–10 秒 | 立即（先输出 job_id 再跑） |
+| turn 受理 | — | 6–40ms |
+| 进度 | 无 | `item/started`、`delta`、`turn/completed` |
+| 中断 | 杀进程树 | `turn/interrupt` |
+
+### 变化
+
+- 新增 `cli.mjs`：`dispatch` / `status` / `verify` / `resume` / `health` / `list`，输出 JSON。
+- 新增 `src/engine/appserver.mjs`：常驻连接、thread/turn、通知流、断线检测。
+- 新增 `src/engine/worker.mjs`：`runJob()` 在进程内跑完一单。
+- 新增 `src/engine/locks.mjs`：写锁从 dispatch 抽出，两处共用。
+- 删除 `server.mjs`、`.mcp.json`、`plugin.json` 的 `dependencies`。
+- 删除 `exec` 通道；claude 无 app-server，走一次性子进程。
+
+### 修复
+
+- **Claude 可写任务权限模式用错**：`dontAsk` 的语义是「不弹窗、只放行已预授权的工具」，不等于允许写工作区。改为 `acceptEdits`；只读仍是 `plan`。
+- **Windows 上 npm 起不来**：`spawnSync('npm')` 实测直接 `ENOENT`（npm 是 `.cmd`，Node 18.20+ 禁止无 shell 启动批处理）。改为定位 `npm-cli.js` 用 node 启动；找不到就跳过测试并标 needsHuman，不判失败。
+- 两个适配器重复的 `launcher` 合并为 `launcherFor`，`.cmd` 在 Windows 走 `cmd /c`。
+- 台账进度落盘加 500ms 节流（逐 token 写盘会把派单拖慢数秒）。
+
+### 已知限制
+
+Windows 沙箱的 Job Object 会在父进程退出时杀掉整棵进程树，独立 worker 无法存活。所以改为同进程执行，由调用方用后台方式运行 CLI 避免阻塞。
+
+### 测试
+
+单测 57 → 51 项（删掉依赖 exec 与 MCP 协议的用例，新增权限、npm 入口、launcher 分派回归）。
 
 ### 为什么换
 
