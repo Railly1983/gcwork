@@ -2,29 +2,15 @@
 
 ## 2.2.0 — 2026-11-16
 
-**修好 MCP 连接（根因是启动方式写错），codex 执行通道换成官方 app-server。**
+**修好 MCP 连接（三个叠加的配置错误），codex 执行通道换成官方 app-server。**
 
-### MCP 一直连不上的真正原因
+### MCP 一直连不上的真正原因（三个叠加）
 
-不是变量替换的问题——`${CODEBUDDY_PLUGIN_ROOT}` 平台是支持的。真正原因是启动方式：
+1. **声明了 `dependencies.mcpServers`**。声明后平台把自带 MCP 当成「需要用户手动连接的外部依赖」，弹引导卡片并一直 pending，永远不会自动启动。官方文档写明：不声明时才会自动读包根 `.mcp.json`。这是主因，已删除该字段。
+2. **`command` 写成裸 `node`**。WorkBuddy 不把自带 Node 放到 PATH，而是通过 `WORKBUDDY_EXTRA_PATHS` 导出所在目录，裸 `node` 找不到。改为官方内置插件的做法：`command: "${CODEBUDDY_PLUGIN_ROOT}/bin/run-node"`。
+3. **多写了 `cwd`**。cwd 指向不存在的路径时 Windows 上 spawn 报 `ENOENT`，看起来像 node.exe 缺失，把排查方向带偏很久。已删除。
 
-1. `command` 写成裸 `node`。WorkBuddy 不把自带的 Node 放在 PATH，而是通过 `WORKBUDDY_EXTRA_PATHS` 导出所在目录，所以裸 `node` 找不到可执行文件，MCP 启动即失败。
-2. 多写了 `cwd: "${CODEBUDDY_PLUGIN_ROOT}"`。cwd 指向不存在的路径时，Windows 上 spawn 报的是 `ENOENT`，看起来像 node.exe 缺失，把排查方向带偏了很久。
-
-正确写法照抄官方内置插件（weixinpay）：用插件自带的 `bin/run-node` 解析宿主 Node。
-
-```json
-{
-  "mcpServers": {
-    "gcwork-engine": {
-      "command": "${CODEBUDDY_PLUGIN_ROOT}/bin/run-node",
-      "args": ["${CODEBUDDY_PLUGIN_ROOT}/mcp/gcwork-engine/server.mjs"]
-    }
-  }
-}
-```
-
-`bin/run-node` 在 POSIX 上从 `WORKBUDDY_EXTRA_PATHS`（冒号分隔）找 `node`，Windows 的 `run-node.cmd` 用分号分隔找 `node.exe`，再退回 PATH，都没有才报 127。脚本必须全 ASCII——Windows 命令行按系统 ANSI 码页解析批处理，中文注释会变成垃圾命令。
+`bin/run-node` 在 POSIX 上从 `WORKBUDDY_EXTRA_PATHS`（冒号分隔）找 `node`，Windows 的 `run-node.cmd` 用分号分隔找 `node.exe`，再退回 PATH，都没有才报 127。脚本必须全 ASCII——Windows 命令行按系统 ANSI 码页解析批处理，中文注释会变成垃圾命令；`bin/run-node` 必须 LF 行尾，否则 macOS/Linux 报 `bad interpreter`，用 `.gitattributes` 锁死。
 
 ### 超时问题
 
