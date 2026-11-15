@@ -8,7 +8,7 @@
 // 用法：
 //   node cli.mjs dispatch --workdir <dir> --prompt <text> [--task <id>] [--executor codex|claude]
 //                                [--model <name>] [--effort low|medium|high] [--role planner|implementer|reviewer]
-//                                [--sandbox read-only|workspace-write] [--timeout 1800]
+//                                [--sandbox read-only|workspace-write] [--timeout 1800] [--async]
 //   node cli.mjs status  --ref <job_id|task_id>
 //   node cli.mjs verify  --ref <job_id|task_id>
 //   node cli.mjs resume  --task <id>
@@ -20,6 +20,12 @@ import { dispatch, status, resume, listJobsTool, recoverOrphans } from './src/di
 import { verify } from './src/verify.mjs';
 import { health } from './src/models.mjs';
 import { runJob } from './src/engine/worker.mjs';
+import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const WORKER_PATH = join(dirname(fileURLToPath(import.meta.url)), 'src', 'engine', 'worker.mjs');
 
 function parseArgs(argv) {
   const out = { _: [] };
@@ -41,6 +47,19 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+/** 起一个独立 worker 跑 spec。返回错误信息或 null。 */
+function spawnWorker(specPath) {
+  try {
+    const child = spawn(process.execPath, [WORKER_PATH, specPath], {
+      detached: true, stdio: 'ignore', windowsHide: true,
+    });
+    child.unref();
+    return null;
+  } catch (e) {
+    return String((e && e.message) || e);
+  }
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const a = parseArgs(rest);
@@ -50,15 +69,15 @@ async function main() {
 
   dispatch --workdir <dir> --prompt <text> [--task <id>] [--executor codex|claude]
            [--model <name>] [--effort low|medium|high] [--role planner|implementer|reviewer]
-           [--sandbox read-only|workspace-write] [--timeout 1800]
+           [--sandbox read-only|workspace-write] [--timeout 1800] [--async]
   status   --ref <job_id|task_id>
   verify   --ref <job_id|task_id>
   resume   --task <id>
   health
   list     [--limit 20]
 
-输出均为 JSON。dispatch 会先打印 job 信息（含 job_id），然后在本进程内把任务跑完。
-想不阻塞就用后台方式执行本命令，期间用 status 查进度。
+输出均为 JSON。dispatch 先打印 job 信息，然后在本进程内把任务跑完（受调用方超时限制，
+Bash 最长 10 分钟）。--async 交给独立 worker 后立即返回，但沙箱环境可能杀不掉 worker。
 `);
     return 0;
   }
@@ -120,13 +139,25 @@ async function main() {
       force: Boolean(a.force),
     });
 
-    // 台账已写入，job 已可见。先把它打出来，让调用方立刻拿到 job_id。
-    const { _spec, ...pub } = r;
+    // 台账已写入，job 立即可见。先把回执打出来，调用方马上拿到 job_id。
+    const { _spec, _specPath, ...pub } = r;
     process.stdout.write(`${JSON.stringify(pub, null, 2)}\n`);
     if (pub.status === 'rejected' || pub.status === 'busy') return 2;
 
-    // 在本进程内把任务跑完：不 spawn 独立进程（沙箱会连带杀掉）。
-    // 调用方用后台方式执行本命令即可不阻塞，期间用 status 查进度。
+    // --async：交独立 worker，本命令立刻返回。任务生命周期不依赖本次调用。
+    // 注意：带沙箱的宿主（用 Job Object 管进程）会在父进程退出时杀掉整棵进程树，
+    // 这种环境下 worker 存活不了，任务会丢。默认不走这条，只在确认环境支持时用。
+    if (a.async) {
+      const err = spawnWorker(_specPath);
+      if (err) {
+        process.stderr.write(`[gcwork] worker 启动失败：${err}\n`);
+        return 1;
+      }
+      process.stderr.write('[gcwork] 已交给后台 worker，本命令立即返回；用 status 查进度\n');
+      return 0;
+    }
+
+    // 默认：在本进程内跑完。可靠，但受调用方超时限制（Bash 最长 10 分钟）。
     try {
       await runJob(_spec);
     } catch (e) {

@@ -259,25 +259,17 @@ export async function dispatch(taskInput = {}) {
   putJob(job);
   activeJobs.add(jobId);
 
-  // 交给独立 worker 执行：worker 自己起 app-server 跑任务，CLI 只负责派单和查状态。
-  // 这样 CLI 退出、宿主重启都不影响正在跑的任务。
+  const spec = { jobId, runDir, cwd: workdir, prompt, model: modelInfo.model, effort: target.effort, sandbox: target.sandbox, timeoutSec, entry, executor: target.cli, gitRepo };
   const specPath = join(runDir, 'spec.json');
-  writeFileSync(specPath, JSON.stringify({
-    jobId, runDir, cwd: workdir, prompt,
-    model: modelInfo.model, effort: target.effort, sandbox: target.sandbox,
-    timeoutSec, entry, executor: target.cli, gitRepo,
-  }, null, 2), 'utf8');
+  writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
 
-  // 任务交给调用方在同一进程内执行（cli.mjs 会调 runJob）。
-  // 不再 spawn 独立 worker：Windows 沙箱的 Job Object 会在父进程退出时
-  // 把整棵进程树杀掉，独立进程活不下来。模型侧用后台方式调用 CLI 即可不阻塞。
   putJob({
     ...getJob(jobId),
     transport: target.cli === 'codex' ? 'appserver' : 'cli',
     workerStartedAt: new Date().toISOString(),
   });
 
-  return { ...toContract(getJob(jobId)), _spec: { jobId, runDir, cwd: workdir, prompt, model: modelInfo.model, effort: target.effort, sandbox: target.sandbox, timeoutSec, entry, executor: target.cli, gitRepo } };
+  return { ...toContract(getJob(jobId)), _spec: spec, _specPath: specPath };
 }
 
 // ---------------------------------------------------------------- 收尾 / 解析
