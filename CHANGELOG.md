@@ -2,83 +2,67 @@
 
 ## 2.2.0 — 2026-11-16
 
-**去掉 MCP，改成命令行 + Bash 调用；codex 执行通道换成官方 app-server。**
+**修好 MCP 连接（根因是启动方式写错），codex 执行通道换成官方 app-server。**
 
-### 为什么去掉 MCP
+### MCP 一直连不上的真正原因
 
-插件包里的 `.mcp.json` 写 `command: "node"` 和 `${CODEBUDDY_PLUGIN_ROOT}`，但宿主把配置复制到用户 `~/.workbuddy/mcp.json` 时不替换这个变量，`cwd` 成了字面量路径。Windows 上 spawn 的 cwd 不存在时报的是 `ENOENT`（看起来像找不到 node.exe，实际 node 完好），连接器因此永远连不上。
+不是变量替换的问题——`${CODEBUDDY_PLUGIN_ROOT}` 平台是支持的。真正原因是启动方式：
 
-对比机器上能连通的三个 server（rea / smartbi / meetingstone），全是写死的绝对路径——说明本机 stdio 这条路要求绝对路径，而插件分发的形态给不出绝对路径。
+1. `command` 写成裸 `node`。WorkBuddy 不把自带的 Node 放在 PATH，而是通过 `WORKBUDDY_EXTRA_PATHS` 导出所在目录，所以裸 `node` 找不到可执行文件，MCP 启动即失败。
+2. 多写了 `cwd: "${CODEBUDDY_PLUGIN_ROOT}"`。cwd 指向不存在的路径时，Windows 上 spawn 报的是 `ENOENT`，看起来像 node.exe 缺失，把排查方向带偏了很久。
 
-改成用 Bash 直接调 `cli.mjs`：不依赖宿主任何配置，不会因为连不上而失效。
+正确写法照抄官方内置插件（weixinpay）：用插件自带的 `bin/run-node` 解析宿主 Node。
+
+```json
+{
+  "mcpServers": {
+    "gcwork-engine": {
+      "command": "${CODEBUDDY_PLUGIN_ROOT}/bin/run-node",
+      "args": ["${CODEBUDDY_PLUGIN_ROOT}/mcp/gcwork-engine/server.mjs"]
+    }
+  }
+}
+```
+
+`bin/run-node` 在 POSIX 上从 `WORKBUDDY_EXTRA_PATHS`（冒号分隔）找 `node`，Windows 的 `run-node.cmd` 用分号分隔找 `node.exe`，再退回 PATH，都没有才报 127。脚本必须全 ASCII——Windows 命令行按系统 ANSI 码页解析批处理，中文注释会变成垃圾命令。
+
+### 超时问题
+
+MCP 进程由宿主常驻，任务跑在进程内，因此不受 Bash 工具单次调用超时（最长 10 分钟）的限制。这是长任务能跑完的可靠办法。
 
 ### 为什么换 app-server
 
-`codex exec` 每单起一个新进程，光启动 2–5 秒，中间没有进度。`codex app-server` 是官方常驻 JSON-RPC 服务，`thread/start` → `turn/start`，受理在毫秒级，过程有通知流。
+`codex exec` 每单起新进程，启动 2–5 秒且无进度。`codex app-server` 是官方常驻 JSON-RPC 服务，`thread/start` → `turn/start`，受理毫秒级，过程有通知流。
 
 实测（codex-cli 0.166.0）：
 
 | 环节 | 改造前 | 改造后 |
 |---|---:|---:|
-| 派单回执 | 5–10 秒 | 立即（先输出 job_id 再跑） |
+| 派单返回 | 5–10 秒 | 0.34 秒 |
 | turn 受理 | — | 6–40ms |
-| 进度 | 无 | `item/started`、`delta`、`turn/completed` |
+| 进度 | 无 | `progress.recent` 实时可查 |
 | 中断 | 杀进程树 | `turn/interrupt` |
 
 ### 变化
 
-- 新增 `cli.mjs`：`dispatch` / `status` / `verify` / `resume` / `health` / `list`，输出 JSON。
+- 新增 `bin/run-node` 与 `bin/run-node.cmd`：解析宿主 Node 并启动 MCP。
 - 新增 `src/engine/appserver.mjs`：常驻连接、thread/turn、通知流、断线检测。
-- 新增 `src/engine/worker.mjs`：`runJob()` 在进程内跑完一单。
-- 新增 `src/engine/locks.mjs`：写锁从 dispatch 抽出，两处共用。
-- 删除 `server.mjs`、`.mcp.json`、`plugin.json` 的 `dependencies`。
-- 删除 `exec` 通道；claude 无 app-server，走一次性子进程。
+- 新增 `src/engine/worker.mjs`：`runJob()` 跑完一单。
+- 新增 `src/engine/locks.mjs`：写锁独立，两处共用。
+- 恢复 `server.mjs`：MCP stdio，任务在常驻进程内后台跑。
+- 删除 `exec` 通道，只留 app-server；claude 无 app-server，走一次性子进程。
+- schema 参数从 12 个减到 9 个，删掉 `risk_level`、`task_type`、`file_count`、`need_write`、`transport`、`output_mode`、`blocking`——要么没人读，要么在 MCP 下无意义。
 
 ### 修复
 
-- **Claude 可写任务权限模式用错**：`dontAsk` 的语义是「不弹窗、只放行已预授权的工具」，不等于允许写工作区。改为 `acceptEdits`；只读仍是 `plan`。
-- **Windows 上 npm 起不来**：`spawnSync('npm')` 实测直接 `ENOENT`（npm 是 `.cmd`，Node 18.20+ 禁止无 shell 启动批处理）。改为定位 `npm-cli.js` 用 node 启动；找不到就跳过测试并标 needsHuman，不判失败。
-- 两个适配器重复的 `launcher` 合并为 `launcherFor`，`.cmd` 在 Windows 走 `cmd /c`。
+- Claude 可写任务权限模式用错：`dontAsk` 的语义是「不弹窗、只放行已预授权的工具」，不等于允许写工作区。改为 `acceptEdits`；只读仍是 `plan`。
+- Windows 上 npm 起不来：`spawnSync('npm')` 实测 `ENOENT`（npm 是批处理脚本，Node 18.20+ 禁止无 shell 启动批处理）。改为定位 `npm-cli.js` 用 node 启动；找不到就跳过测试标 needsHuman，不判失败。
+- 两个适配器重复的 `launcher` 合并为 `launcherFor`，Windows 下批处理脚本走 `cmd /c`。
 - 台账进度落盘加 500ms 节流（逐 token 写盘会把派单拖慢数秒）。
 
-### 已知限制
-
-Windows 沙箱的 Job Object 会在父进程退出时杀掉整棵进程树，独立 worker 无法存活。所以改为同进程执行，由调用方用后台方式运行 CLI 避免阻塞。
-
 ### 测试
 
-单测 57 → 51 项（删掉依赖 exec 与 MCP 协议的用例，新增权限、npm 入口、launcher 分派回归）。
-
-### 为什么换
-
-原来每派一单都要新起 `codex exec`，光进程启动就 2–5 秒，中间没有任何进度，用户只能干等。app-server 是 codex 官方的常驻 JSON-RPC 服务，thread 建一次反复用，`turn/start` 受理在毫秒级，过程通过通知流实时可见。
-
-实测（codex-cli 0.166.0，本机）：
-
-| 环节 | 改造前 | 改造后 |
-|---|---:|---:|
-| 派单返回 | 5–10 秒（进程启动 + 无进度） | 首单 ~2.7 秒，之后 **340ms** |
-| 进度可见性 | 无 | `item/started`、`delta`、`turn/completed` 实时 |
-| 中断 | 杀进程树 | `turn/interrupt`，不伤共享进程 |
-
-### 变化
-
-- 新增 `src/engine/appserver.mjs`：常驻连接管理、`thread/start`、`turn/start`、`turn/steer`、`turn/interrupt`、通知流解析、断线检测。
-- `dispatch` 优先走 app-server；起不来自动降级 `exec`（`transportWarning` 会说明原因），保证不可用时仍有退路。
-- MCP 启动时后台预热 app-server，省掉用户第一次派单的冷启动。
-- `status` 返回 `progress.recent`，用户问「跑哪了」可以直接看到最近几步，不再干等。
-- 删掉自设的「全局并发 4 单」上限，并发交给宿主与系统调度；只保留同目录写锁（保护文件不被两个写任务同时改）。
-
-### 修复
-
-- **Claude 可写任务权限用错模式**：原先映射成 `dontAsk`，它的语义是「不弹窗、只放行已预先授权的工具」，不等于允许写工作区，编辑操作可能被拒。改为 `acceptEdits`；只读仍是 `plan`。
-- **Windows 上 `npm` 起不来**：`verify` 里直接 `spawnSync('npm')`，而 Windows 的 npm 是 `.cmd`，Node 18.20+ 为堵命令注入（CVE-2024-27980）不再允许无 shell 启动批处理，实测直接 `ENOENT`。改为定位 `npm-cli.js` 用 `node` 启动。
-- 两个适配器里重复的 `launcher` 合并为 `models.launcherFor`，`.cmd` 在 Windows 走 `cmd /c`。
-- 台账进度落盘加节流：`delta` 是逐 token 的，原先每条都写盘，把派单拖慢好几秒。改为关键事件立即写、普通 delta 每 500ms 最多一次。
-
-### 测试
-
-单测 54 → 57 项，新增 Claude 权限、npm 入口、launcher 分派三组回归。
+单测 51 项、selfcheck 20 项全绿。
 
 ## 2.1.1 — 2026-11-15
 

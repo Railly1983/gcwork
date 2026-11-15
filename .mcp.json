@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gcwork-engine": {
+      "command": "${CODEBUDDY_PLUGIN_ROOT}/bin/run-node",
+      "args": ["${CODEBUDDY_PLUGIN_ROOT}/mcp/gcwork-engine/server.mjs"]
+    }
+  }
+}

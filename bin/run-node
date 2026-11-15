@@ -1,0 +1,32 @@
+#!/bin/sh
+# 解析宿主指定的 Node 并执行（macOS / Linux）。
+#
+# MCP stdio 启动器在 Windows 上会通过 PATHEXT 找到同目录的 run-node.cmd，
+# 这个脚本只服务 POSIX。
+#
+# 为什么不用裸 `node`：host 不把自带 Node 放到 PATH，而是通过
+# WORKBUDDY_EXTRA_PATHS（':' 分隔）导出所在目录。先信宿主的答案，再退回 PATH，
+# 都没有就明确报错——不要自己去猜宿主的内部目录结构，那样可能拿到过期的安装。
+
+set -e
+
+resolve_from_extra_paths() (
+  [ -n "${WORKBUDDY_EXTRA_PATHS:-}" ] || exit 1
+  IFS=:
+  for _d in $WORKBUDDY_EXTRA_PATHS; do
+    if [ -n "$_d" ] && [ -x "$_d/node" ]; then
+      printf '%s\n' "$_d/node"
+      exit 0
+    fi
+  done
+  exit 1
+)
+
+NODE_BIN=$(resolve_from_extra_paths || command -v node || true)
+
+if [ -z "$NODE_BIN" ]; then
+  echo "[gcwork] FATAL: cannot locate node (checked WORKBUDDY_EXTRA_PATHS and PATH)" >&2
+  exit 127
+fi
+
+exec "$NODE_BIN" "$@"
