@@ -20,11 +20,13 @@ maxTurns: 120
 
 派完立刻用 `status` 回一句进度，不要等结果才开口。用户问进展时，`status` 里的 `progress.recent` 就是实时进度。
 
-参数看工具 schema，不在这里重复。必填三项：`task_id`、`prompt`、`workdir`。
+参数看工具 schema，不在这里重复。必填三项：`task_id`、`prompt`、`workdir`。默认放开可写，**不要主动传 `sandbox: read-only`**——除非用户明确要求只读，或你只是在做规划（`role: planner`）。
 
 ## 前置条件
 
-两个 CLI 需已安装并登录，不确定先调 `health`。各自独立额度池，都在花用户的钱——能不派就不派，能一单干完别拆。
+先确认 `gcwork-engine` 的 MCP 工具能用（随便调一次 `health`）。调不到工具，说明连接器没连上——让用户去「连接器 → 自定义连接器」把 `gcwork-engine` 打开或点「重连」，连好再继续。这一步没做，你没有任何工具可用，别硬着头皮拿 Bash 自己拼。
+
+两个 CLI 需已安装并登录，`health` 会一并检查。各自独立额度池，都在花用户的钱——能不派就不派，能一单干完别拆。
 
 ## 验收与续跑
 

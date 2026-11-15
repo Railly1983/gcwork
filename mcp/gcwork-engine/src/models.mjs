@@ -24,11 +24,14 @@ export const MODELS = {
 
 const TIER_EFFORT = { plan: 'high', hard: 'high', main: 'medium', chore: 'medium' };
 
-// 角色 → 默认画像（任务类型、是否写、默认强度、沙箱、codex/claude 默认模型）。
+// 角色 → 默认画像（任务类型、是否写、默认强度、codex/claude 默认模型）。
+//
+// 沙箱不在这里定：默认一律可写，否则会白白削弱模型能力。
+// 只有两种情况进只读——调用方显式传 sandbox=read-only，或用 planner（计划模式）。
 export const ROLE_PROFILE = {
   planner: { task_type: 'review', need_write: false, defaultEffort: 'high', sandbox: 'read-only', codex: 'astra', claude: 'fable' },
-  implementer: { task_type: 'implement', need_write: true, defaultEffort: 'medium', sandbox: 'workspace-write', codex: 'terra', claude: 'sonnet' },
-  reviewer: { task_type: 'review', need_write: false, defaultEffort: 'medium', sandbox: 'read-only', codex: 'astra', claude: 'fable' },
+  implementer: { task_type: 'implement', need_write: true, defaultEffort: 'medium', codex: 'terra', claude: 'sonnet' },
+  reviewer: { task_type: 'review', need_write: false, defaultEffort: 'medium', codex: 'terra', claude: 'sonnet' },
 };
 
 const BILLING_ENV = {
@@ -89,13 +92,11 @@ export function pickTarget(task = {}) {
     const name = normModel(task.model);
     if (!name) return { error: `未知模型：${task.model}；可用：${Object.keys(MODELS).join(', ')}` };
     const m = MODELS[name];
-    // 沙箱优先级：显式 sandbox > 只读角色(planner/reviewer)的只读默认 > 模型 tier 默认。
-    // 不能让显式 model 悄悄把 reviewer 变成可写——只读角色必须默认只读。
+    // 沙箱优先级：显式 sandbox > planner（计划模式）> 默认可写。
+    // 默认给可写：只读会砍掉模型一半能力，不该是常态。
     const role = normRole(task.role);
     const roleProfile = role ? ROLE_PROFILE[role] : null;
-    const defaultSandbox = roleProfile && roleProfile.need_write === false
-      ? 'read-only'
-      : (m.tier === 'plan' ? 'read-only' : 'workspace-write');
+    const defaultSandbox = role === 'planner' ? 'read-only' : 'workspace-write';
     const sandbox = task.sandbox || defaultSandbox;
     const effort = normEffort(task.effort) || (roleProfile ? roleProfile.defaultEffort : TIER_EFFORT[m.tier]);
     return { cli: m.cli, name, effort, sandbox, readOnly: sandbox === 'read-only' };
@@ -113,7 +114,7 @@ export function pickTarget(task = {}) {
     file_count: task.file_count,
   });
   const name = cli === 'codex' ? role.codex : role.claude;
-  const sandbox = task.sandbox || role.sandbox;
+  const sandbox = task.sandbox || (roleKey === 'planner' ? 'read-only' : 'workspace-write');
   const effort = normEffort(task.effort) || role.defaultEffort;
   return { cli, name, effort, sandbox, readOnly: sandbox === 'read-only' };
 }

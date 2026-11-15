@@ -51,7 +51,24 @@ node server.mjs        # 作为 MCP server 启动（stdio）
 ~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/
 ```
 
-放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。平台会自动拉起 `dependencies.mcpServers` 里的 gcwork-engine。
+放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。
+
+## 连上 MCP（必须做一次）
+
+专家本身只是提示词，真正干活的是 `gcwork-engine` 这个 MCP 服务。**没连上它，专家就没有任何工具可用**，只会变成一份说明书。
+
+连接步骤：
+
+1. 打开「连接器 → 自定义连接器」，找到 `gcwork-engine`
+2. 右侧开关打开；若显示 `Connection closed` 或红点，点「重连」
+3. 状态变成已连接、工具数正常后，回到对话召唤专家
+
+排查要点：
+
+- 状态一直连不上，点卡片上的「复制日志」看具体报错
+- 报 `spawn ...node.exe ENOENT`：说明 `command` 指向的 node 路径不对。本服务的启动脚本 `bin/run-node` 会自己按 `WORKBUDDY_EXTRA_PATHS` 找宿主 Node，不需要你配 PATH
+- 报路径不存在：部分平台版本不会展开 `.mcp.json` 里的 `${CODEBUDDY_PLUGIN_ROOT}`。这时把该字段改成实际安装路径即可，例如
+  `"command": "C:/Users/<你>/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/bin/run-node.cmd"`
 
 ## 成本
 

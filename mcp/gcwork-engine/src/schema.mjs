@@ -13,7 +13,7 @@ export const TOOLS = [
         executor: { type: 'string', enum: ['auto', 'claude', 'codex'], description: '指定执行器；auto 由引擎路由' },
         role: { type: 'string', enum: ['planner', 'implementer', 'reviewer'], description: '角色画像，决定默认强度/沙箱' },
         model: { type: 'string', description: '精确模型名（astra/sol/terra/luna/fable/opus/sonnet/haiku），优先级高于 role' },
-        sandbox: { type: 'string', enum: ['read-only', 'workspace-write'], description: '执行沙箱；read-only 禁止改文件' },
+        sandbox: { type: 'string', enum: ['read-only', 'workspace-write'], description: '执行沙箱。默认 workspace-write；只有用户明确要求只读时才传 read-only' },
         effort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
         timeout_sec: { type: 'integer', description: '超时秒数，默认 1800，上限 14400' },
         env: { type: 'string', enum: ['inherit', 'clean'], description: 'clean 模式剥离计费相关环境变量' },

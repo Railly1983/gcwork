@@ -1,7 +1,7 @@
 {
   "name": "gcwork",
   "version": "2.2.0",
-  "description": "Connects the local Codex and Claude Code to WorkBuddy via a thin expert + MCP engine. Natural-language dispatch, uniform routing, artifact verification, and half-automatic resume — survives the 9-minute host timeout by running detached.",
+  "description": "Connects local Codex and Claude Code to WorkBuddy through a thin expert plus an MCP engine. Requires the gcwork-engine connector to be connected once (connectors page); after that, natural-language dispatch, uniform routing, artifact verification and resume all work automatically.",
   "author": {
     "name": "Jike",
     "email": "30673448@qq.com"
@@ -20,8 +20,8 @@
     "zh": "Codex/Claude协作专家"
   },
   "displayDescription": {
-    "en": "Plug Codex and Claude into WorkBuddy: natural-language dispatch, with routing, verification and resume handled by the engine.",
-    "zh": "把 Codex 与 Claude 接进 WorkBuddy，自然语言派单，引擎负责路由、验收与续跑。"
+    "en": "Connect the gcwork-engine connector first; then dispatch coding tasks to local Codex and Claude in natural language, with routing, verification and resume handled by the engine.",
+    "zh": "使用前需在连接器里连上 gcwork-engine；之后直接用自然语言把编码任务派给本机 Codex 与 Claude，引擎负责路由、验收与续跑。"
   },
   "avatar": "avatars/expert.png",
   "categoryId": "02-Engineering",

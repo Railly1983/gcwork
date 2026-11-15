@@ -287,20 +287,27 @@ test('BUG1 回归：verify 对 ok 任务仍可 accepted', () => {
   assert.equal(r.jobStatus, 'ok');
 });
 
-test('BUG2 回归：显式 model + reviewer 默认只读（不会被 sol 悄悄改成可写）', () => {
-  // reviewer 显式配 sol（tier=hard，原本会落到 workspace-write）
-  const t = models.pickTarget({ role: 'reviewer', model: 'sol' });
-  assert.equal(t.cli, 'codex');
-  assert.equal(t.name, 'sol');
-  assert.equal(t.sandbox, 'read-only', 'reviewer+sol 默认必须只读');
-  assert.equal(t.readOnly, true);
-  // 显式 sandbox 仍可覆盖
-  const t2 = models.pickTarget({ role: 'reviewer', model: 'sol', sandbox: 'workspace-write' });
-  assert.equal(t2.sandbox, 'workspace-write');
-  assert.equal(t2.readOnly, false);
-  // planner + 可写 tier 模型也要只读
-  const t3 = models.pickTarget({ role: 'planner', model: 'terra' });
-  assert.equal(t3.sandbox, 'read-only');
+test('沙箱策略：默认放开可写，只有 planner 或显式要求才只读', () => {
+  // 默认不砍能力：reviewer 也能跑测试、必要时修——只读会白白削弱模型
+  const reviewer = models.pickTarget({ role: 'reviewer', model: 'sol' });
+  assert.equal(reviewer.sandbox, 'workspace-write', 'reviewer 默认可写');
+  assert.equal(reviewer.readOnly, false);
+
+  const impl = models.pickTarget({ role: 'implementer', model: 'terra' });
+  assert.equal(impl.sandbox, 'workspace-write');
+
+  // 不带 role 时也默认可写
+  const plain = models.pickTarget({ model: 'sol' });
+  assert.equal(plain.sandbox, 'workspace-write');
+
+  // 计划模式（planner）才进只读
+  const planner = models.pickTarget({ role: 'planner', model: 'astra' });
+  assert.equal(planner.sandbox, 'read-only', 'planner 是计划模式，只读');
+  assert.equal(planner.readOnly, true);
+
+  // 显式 sandbox 永远最高优先级
+  assert.equal(models.pickTarget({ role: 'planner', model: 'astra', sandbox: 'workspace-write' }).sandbox, 'workspace-write');
+  assert.equal(models.pickTarget({ role: 'implementer', model: 'terra', sandbox: 'read-only' }).sandbox, 'read-only');
 });
 
 test('BUG3 回归：进程仍存活 + 已超时 → 惰性判 timeout', async () => {
