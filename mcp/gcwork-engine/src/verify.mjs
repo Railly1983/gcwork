@@ -5,6 +5,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveRef } from './engine/ledger.mjs';
 import { gitSnapshot, gitDelta, snapshotFromJSON } from './engine/git.mjs';
+import { findNpmCli } from './models.mjs';
 
 // 锁文件 / CI / 依赖 / 密钥 —— 改动这些必须人工复核，不能自动放行。
 const SENSITIVE = [
@@ -99,11 +100,18 @@ export function verify(ref) {
     } catch { /* 坏 json */ }
     if (scripts.test) {
       testRan = true;
-      const r = spawnSync('npm', ['test'], { cwd: workdir, encoding: 'utf8', timeout: 300_000, windowsHide: true });
+      // Windows 上 npm 是 .cmd，不能直接 spawn（Node 18.20+ 禁止无 shell 启动批处理）。
+      // 优先用 node + npm-cli.js；实在找不到才退回裸 npm。
+      const npmCli = findNpmCli();
+      const [cmd, args] = npmCli
+        ? [process.execPath, [npmCli, 'test']]
+        : ['npm', ['test']];
+      const r = spawnSync(cmd, args, { cwd: workdir, encoding: 'utf8', timeout: 300_000, windowsHide: true });
       testsPassed = r.status === 0;
       if (!testsPassed) {
         accepted = false;
-        reasons.push(`测试未通过（exit ${r.status}）`);
+        const why = r.error ? `${r.error.code}: ${r.error.message}` : `exit ${r.status}`;
+        reasons.push(`测试未通过（${why}）`);
       }
     } else {
       needsHuman = true;

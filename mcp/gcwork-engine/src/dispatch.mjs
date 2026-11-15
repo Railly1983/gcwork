@@ -14,14 +14,24 @@ import {
 import { classifyError, parseResumeAfter } from './engine/errors.mjs';
 import { buildArgv as codexArgv, readResult as codexRead } from './adapters/codex.mjs';
 import { buildArgv as claudeArgv, readResult as claudeRead } from './adapters/claude.mjs';
+import {
+  ensureAppServer, startThread, startTurn, steerTurn, interruptTurn, subscribe,
+  appServerStatus, shutdownAppServer,
+} from './engine/appserver.mjs';
 
-const MAX_CONCURRENCY = 4; // 全局并发上限（只读任务不计入）
 const DEFAULT_TIMEOUT_SEC = 1800; // 30 分钟安全上限，远高于宿主轮次上限
 const MAX_PROMPT = 200_000; // 简报上限保护
 const MAX_PARTIAL = 4000; // partialOutput 截断
+const MAX_PROGRESS_ITEMS = 40; // 进度里保留的最近条目数
 
-// 进程内并发追踪 + 写锁（单进程 server 足够；多实例场景以文件锁兜底写冲突）
+// 进程内活跃任务（用于同目录写锁与状态查询；并发上限交给宿主，不再自己掐）
 const activeJobs = new Set();
+
+// app-server 会话 → job 的路由表。threadId 是主键，事件到达时据此归位。
+const threadRoutes = new Map(); // threadId → { jobId, turnId, messageBuf, items, status, error }
+// 台账落盘节流：delta 是逐 token 的，每个都写盘会把派单拖慢几秒。
+const PROGRESS_FLUSH_MS = 500;
+const lastFlushAt = new Map(); // jobId → 上次写台账的时间戳
 
 function nowStamp() {
   const d = new Date();
@@ -66,6 +76,83 @@ function validateDispatch(task) {
     return `未知 role：${task.role}；可用 planner / implementer / reviewer`;
   }
   return null;
+}
+
+// ---------------------------------------------------------------- app-server 事件路由
+
+/**
+ * 通知流 → job。事件带 threadId，据此找到对应任务，累积消息与进度。
+ * 只做累积与落台账，不做业务判断（终态仍由 turn/completed 决定）。
+ */
+function handleAppServerEvent({ method, params }) {
+  const threadId = params?.threadId || params?.thread?.id || null;
+  if (!threadId) return;
+  const route = threadRoutes.get(threadId);
+  if (!route) return;
+
+  const pushItem = (label) => {
+    route.items.push({ at: new Date().toISOString(), label });
+    if (route.items.length > MAX_PROGRESS_ITEMS) route.items.shift();
+  };
+
+  if (method === 'turn/started') {
+    if (params.turnId || params.turn?.id) route.turnId = params.turnId || params.turn.id;
+    pushItem('开始执行');
+  } else if (method === 'item/started') {
+    const t = params.item?.type;
+    if (t) pushItem(`执行中：${t}`);
+  } else if (method === 'item/agentMessage/delta') {
+    if (params.delta) route.messageBuf += String(params.delta);
+  } else if (method === 'item/completed') {
+    const it = params.item || {};
+    if (it.type === 'agentMessage' && it.text && !route.messageBuf) route.messageBuf = String(it.text);
+    if (it.type === 'commandExecution' && it.command) {
+      pushItem(`命令：${String(it.command).slice(0, 80)}（exit ${it.exitCode ?? '?'}）`);
+    }
+  } else if (method === 'turn/completed') {
+    route.status = 'completed';
+    if (params.usage) route.usage = params.usage;
+    pushItem('执行结束');
+  } else if (method === 'turn/failed' || method === 'error') {
+    route.status = 'failed';
+    route.error = params?.error?.message || params?.message || 'turn 失败';
+    pushItem(`失败：${String(route.error).slice(0, 100)}`);
+  } else if (method === 'turn/interrupted') {
+    route.status = 'interrupted';
+    pushItem('已中断');
+  } else if (method === 'item/commandExecution/requestApproval' || method === 'item/fileChange/requestApproval') {
+    // 只读/沙箱内不该出现审批请求；出现说明策略没生效，记录但不阻塞
+    pushItem('收到审批请求（已自动拒绝，请检查沙箱策略）');
+  }
+
+  // 关键事件立即落盘；普通 delta 节流，避免逐 token 写文件把 IO 打满。
+  const critical = method === 'turn/started' || method === 'turn/completed'
+    || method === 'turn/failed' || method === 'turn/interrupted' || method === 'item/started';
+  const now = Date.now();
+  const last = lastFlushAt.get(route.jobId) || 0;
+  if (!critical && now - last < PROGRESS_FLUSH_MS) return;
+  lastFlushAt.set(route.jobId, now);
+
+  const job = getJob(route.jobId);
+  if (job && job.status === 'running') {
+    putJob({
+      ...job,
+      turnId: route.turnId || job.turnId || null,
+      progress: {
+        items: route.items.slice(-MAX_PROGRESS_ITEMS),
+        messageLength: route.messageBuf.length,
+        turnStatus: route.status || 'running',
+        updatedAt: new Date(now).toISOString(),
+      },
+    });
+  }
+}
+
+let appServerSubscribed = false;
+function ensureSubscribed() {
+  if (appServerSubscribed) return;
+  subscribe(handleAppServerEvent);
+  appServerSubscribed = true;
 }
 
 // ---------------------------------------------------------------- 写锁（同目录同时仅一个可写任务）
@@ -160,6 +247,22 @@ function releaseLock(p, jobId = null) {
 
 // ---------------------------------------------------------------- 派发
 
+/**
+ * 预热：先把 app-server 拉起来并完成握手，省掉用户第一次派单时的冷启动。
+ * 不建 thread（thread 与 cwd 绑定，预热建的未必用得上），只做握手。
+ */
+export async function warmUpAppServer() {
+  try {
+    const entry = findCodexEntry();
+    if (!entry) return { ok: false, detail: '找不到 codex 入口' };
+    ensureSubscribed();
+    await ensureAppServer({ entry });
+    return { ok: true, ...appServerStatus() };
+  } catch (e) {
+    return { ok: false, detail: String((e && e.message) || e) };
+  }
+}
+
 export async function dispatch(taskInput = {}) {
   ensureDirs();
   pruneRuns();
@@ -192,11 +295,9 @@ export async function dispatch(taskInput = {}) {
   const workdir = resolve(task.workdir);
   const readOnly = target.readOnly;
 
-  // 并发上限（只读不计入）+ 同目录写锁
+  // 同目录写锁：只保护「同一目录不被两个写任务同时改」，这是文件安全底线。
+  // 并发总量不在这里限制——交给宿主与系统资源调度，自己再设一道只会添麻烦。
   if (!readOnly) {
-    if (activeJobs.size >= MAX_CONCURRENCY) {
-      return { status: 'busy', detail: `全局并发已达上限（${MAX_CONCURRENCY}），稍后再派`, task_id: task.task_id };
-    }
     const lock = acquireLock(workdir, Boolean(task.force));
     if (!lock.ok) return { status: lock.code, detail: lock.detail, task_id: task.task_id };
     task._lockPath = lock.path;
@@ -218,29 +319,39 @@ export async function dispatch(taskInput = {}) {
   const prompt = String(task.prompt).slice(0, MAX_PROMPT);
   writeFileSync(join(runDir, 'brief.md'), prompt, 'utf8');
 
-  const before = gitSnapshot(workdir);
-  const gitRepo = before !== null;
-
-  let argv;
-  let stdinText = null;
-  const common = {
-    effort: target.effort, sandbox: target.sandbox, modelInfo, entry, runDir, gitRepo,
-  };
-  if (target.cli === 'codex') {
-    argv = codexArgv({ ...common });
-    stdinText = prompt; // codex 的 `-` 从 stdin 读提示
-  } else {
-    argv = claudeArgv({ ...common, prompt });
-  }
-
-  const stdoutPath = join(runDir, 'stdout.log');
-  const stderrPath = join(runDir, 'stderr.log');
-  const { pid, spawnError } = spawnDetached(argv, {
-    cwd: workdir, env: childEnv(task.env || 'inherit'), stdoutPath, stderrPath, stdinText,
-  });
-
   const startedAt = new Date().toISOString();
   const timeoutSec = Math.min(Number(task.timeout_sec) || DEFAULT_TIMEOUT_SEC, 14400);
+
+  // ---- 通道选择：codex 优先走常驻 app-server（派单毫秒级、进度实时可见），
+  // 起不来就退回 exec（每单新进程）。claude 没有 app-server，仍走 exec。
+  let transport = 'exec';
+  let appThread = null;
+  let transportWarning = null;
+  let before = null;
+
+  if (target.cli === 'codex' && task.transport !== 'exec') {
+    // 先发起握手（app-server 在独立进程里启动），趁这段时间做 git 快照
+    const appReady = (async () => {
+      ensureSubscribed();
+      await ensureAppServer({ entry });
+      return startThread({ cwd: workdir, model: modelInfo.model });
+    })();
+    before = gitSnapshot(workdir); // 同步，但与上面的进程启动重叠
+    try {
+      appThread = await appReady;
+      transport = 'appserver';
+    } catch (e) {
+      appThread = null;
+      transport = 'exec';
+      transportWarning = `app-server 不可用，已降级到 exec：${e && e.message}`;
+    }
+  } else {
+    before = gitSnapshot(workdir);
+  }
+
+  const gitRepo = before !== null;
+  const stdoutPath = join(runDir, 'stdout.log');
+  const stderrPath = join(runDir, 'stderr.log');
 
   const job = {
     job_id: jobId,
@@ -259,7 +370,12 @@ export async function dispatch(taskInput = {}) {
     runDir,
     prompt,
     status: 'running',
-    pid: pid || null,
+    transport,
+    transportWarning,
+    threadId: appThread ? appThread.threadId : null,
+    turnId: null,
+    progress: { items: [], messageLength: 0, turnStatus: 'pending', updatedAt: startedAt },
+    pid: null,
     startedAt,
     timeoutSec,
     envMode: task.env || 'inherit',
@@ -271,6 +387,78 @@ export async function dispatch(taskInput = {}) {
   };
   putJob(job);
   activeJobs.add(jobId);
+
+  // ---- 分支 A：app-server。先落 job 再发 turn，保证事件到达时查得到任务。
+  if (transport === 'appserver') {
+    const route = {
+      jobId, turnId: null, messageBuf: '', items: [], status: 'running', error: null, usage: null,
+    };
+    threadRoutes.set(job.threadId, route);
+
+    try {
+      const { turnId } = await startTurn({
+        threadId: job.threadId, text: prompt, effort: target.effort, model: modelInfo.model,
+        cwd: workdir,
+      });
+      route.turnId = turnId;
+      putJob({ ...getJob(jobId), turnId });
+
+      // 超时管理：到点 interrupt，不杀进程（app-server 是共享的）
+      const deadline = setTimeout(() => {
+        if (route.status === 'running' && route.turnId) {
+          try { interruptTurn({ threadId: job.threadId, turnId: route.turnId }); } catch { /* 忽略 */ }
+          markTimedOut(runDir);
+        }
+      }, timeoutSec * 1000);
+
+      if (task.blocking) {
+        const done = await waitAppTurn(route, timeoutSec * 1000);
+        clearTimeout(deadline);
+        if (!done) markTimedOut(runDir);
+        return toContract(finalizeAppJob(jobId, route, runDir));
+      }
+
+      // 非阻塞：后台等终态，完成后收尾落台账（调用方先用 status 看进度）
+      deadline.unref?.();
+      waitAppTurn(route, timeoutSec * 1000).then(() => {
+        finalizeAppJob(jobId, route, runDir);
+      }).catch(() => { /* 收尾失败由 recoverOrphans 兜 */ });
+
+      return toContract({ ...getJob(jobId), status: 'running' });
+    } catch (e) {
+      // turn 发不出去：当作启动失败，明确终态并释放锁
+      threadRoutes.delete(job.threadId);
+      const failed = {
+        ...getJob(jobId), status: 'failed',
+        summary: `启动失败：${e && e.message}`,
+        partialOutput: String(e && e.message || e),
+        endedAt: new Date().toISOString(),
+      };
+      putJob(failed);
+      activeJobs.delete(jobId);
+      releaseLock(job.lockPath, jobId);
+      return toContract(failed);
+    }
+  }
+
+  // ---- 分支 B：exec（原路径，也是 app-server 失败时的降级）
+  let argv;
+  let stdinText = null;
+  const common = {
+    effort: target.effort, sandbox: target.sandbox, modelInfo, entry, runDir, gitRepo,
+  };
+  if (target.cli === 'codex') {
+    argv = codexArgv({ ...common });
+    stdinText = prompt; // codex 的 `-` 从 stdin 读提示
+  } else {
+    argv = claudeArgv({ ...common, prompt });
+  }
+
+  const spawned = spawnDetached(argv, {
+    cwd: workdir, env: childEnv(task.env || 'inherit'), stdoutPath, stderrPath, stdinText,
+  });
+  const { pid, spawnError } = spawned;
+  putJob({ ...getJob(jobId), pid: pid || null });
 
   // 启动就失败（找不到 CLI 可执行文件等）：立即形成明确终态，不进入等待。
   if (!pid && spawnError) {
@@ -313,6 +501,88 @@ export async function dispatch(taskInput = {}) {
   }
 }
 
+// ---------------------------------------------------------------- app-server 收尾
+
+/** 等一轮跑到终态；超时返回 false。 */
+function waitAppTurn(route, timeoutMs, pollMs = 400) {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const tick = () => {
+      if (route.status !== 'running') { resolve(true); return; }
+      if (Date.now() - start >= timeoutMs) { resolve(false); return; }
+      setTimeout(tick, pollMs);
+    };
+    tick();
+  });
+}
+
+/**
+ * app-server 任务的收尾：把内存里累积的消息与进度落成终态。
+ * 与 exec 路径共享 git 快照、写锁、台账这套约束。
+ */
+function finalizeAppJob(jobId, route, runDir) {
+  const job = getJob(jobId);
+  if (!job) return null;
+  if (isTerminal(job.status)) return job;
+
+  const message = (route.messageBuf || '').trim();
+  let status;
+  if (wasTimedOut(runDir) || route.status === 'interrupted') status = 'timeout';
+  else if (route.status === 'failed') status = mapRuntimeError(String(route.error || ''));
+  else if (route.status === 'completed') status = message ? 'ok' : 'crashed';
+  else status = 'crashed'; // 既非完成也非失败，进程可能没了
+
+  const before = snapshotFromJSON(job.before_snapshot);
+  const after = gitSnapshot(job.workdir);
+  const delta = gitDelta(before, after);
+  const changedFiles = delta ? delta.paths : [];
+  let headMoved = Boolean(delta?.headMoved);
+
+  const gitWarnings = [];
+  if (job.git_warning) gitWarnings.push(job.git_warning);
+  if (headMoved) gitWarnings.push('执行期间 HEAD 变了：CLI 可能提交过代码');
+
+  writeFileSync(join(runDir, 'message.md'), message ? `${message}\n` : '', 'utf8');
+  if (changedFiles.length) writeFileSync(join(runDir, 'changed.txt'), `${changedFiles.join('\n')}\n`, 'utf8');
+  const diff = gitDiffText(job.workdir);
+  if (diff) writeFileSync(join(runDir, 'diff.txt'), `${diff}\n`, 'utf8');
+
+  const endedAt = new Date().toISOString();
+  const updated = {
+    ...job,
+    status,
+    summary: truncate(message ? (message.split(/\r?\n/).find((l) => l.trim()) || '(空行)') : status, 500),
+    partialOutput: truncate(message || route.error || '（无输出）', MAX_PARTIAL),
+    changed_files: changedFiles,
+    changed_stats: delta ? delta.stats : null,
+    headMoved,
+    usage: route.usage || null,
+    endedAt,
+    durationSec: Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(job.startedAt)) / 1000)),
+    git_warning: gitWarnings.length ? gitWarnings.join('；') : null,
+    progress: {
+      items: route.items.slice(-MAX_PROGRESS_ITEMS),
+      messageLength: message.length,
+      turnStatus: route.status,
+      updatedAt: endedAt,
+    },
+    artifacts: {
+      changed_files: join(runDir, 'changed.txt'),
+      diff_path: diff ? join(runDir, 'diff.txt') : null,
+      message_path: join(runDir, 'message.md'),
+    },
+  };
+
+  // app-server 与 MCP 同生共死，不存在「子进程还活着但任务已终态」的情况，
+  // 因此这里可以安全释放写锁。
+  updated.lockHeld = false;
+  putJob(updated);
+  activeJobs.delete(jobId);
+  threadRoutes.delete(job.threadId);
+  releaseLock(job.lockPath, jobId);
+  return updated;
+}
+
 // ---------------------------------------------------------------- 收尾 / 解析
 
 /** 读 runDir 下的产物文件。 */
@@ -327,6 +597,34 @@ export function finalizeFromJob(jobId) {
   const job = getJob(jobId);
   if (!job) return null;
   if (isTerminal(job.status)) return job;
+
+  // app-server 任务没有独立子进程（pid 为空），不能按「进程已死」判。
+  // 它是否跑完，看事件流推过来的 turn 状态。
+  if (job.transport === 'appserver') {
+    const route = job.threadId ? threadRoutes.get(job.threadId) : null;
+    if (route && route.status === 'running') {
+      // 还在跑：检查是否超期
+      const limit = Number(job.timeoutSec) || DEFAULT_TIMEOUT_SEC;
+      const elapsed = job.startedAt ? Date.now() - Date.parse(job.startedAt) : 0;
+      if (elapsed < limit * 1000) return job;
+      try { if (route.turnId) interruptTurn({ threadId: job.threadId, turnId: route.turnId }); } catch { /* 忽略 */ }
+      markTimedOut(job.runDir);
+      return finalizeAppJob(jobId, route, job.runDir);
+    }
+    if (route) return finalizeAppJob(jobId, route, job.runDir);
+    // 路由表丢了（MCP 重启过）：无法判定真实状态，标成 crashed 并说明原因
+    const orphaned = {
+      ...job,
+      status: 'crashed',
+      summary: 'MCP 重启后丢失了该任务的连接，无法确认最终结果',
+      partialOutput: job.progress?.items?.map((i) => i.label).join('\n') || '（无进度记录）',
+      endedAt: new Date().toISOString(),
+    };
+    putJob(orphaned);
+    activeJobs.delete(jobId);
+    releaseLock(job.lockPath, jobId);
+    return orphaned;
+  }
 
   // 先看进程死活：已经结束的任务按产物判定，不能因为「查询得晚」就判超时。
   const alive = Boolean(job.pid && pidAlive(job.pid));
@@ -561,9 +859,13 @@ export function recoverOrphans() {
   let recovered = 0;
   for (const id of all) {
     const j = getJob(id);
-    if (j && j.status === 'running' && (!j.pid || !pidAlive(j.pid))) {
-      finalize(j);
-      recovered += 1;
+    if (!j || j.status !== 'running') continue;
+    // app-server 任务没有 pid，不能按「进程死了」判；交给 finalizeFromJob 统一处理
+    // （它区分 exec 与 app-server，并对丢了连接的 app-server 任务标 crashed 说明原因）
+    if (j.transport === 'appserver' || !j.pid || !pidAlive(j.pid)) {
+      const before = j.status;
+      const after = finalizeFromJob(id);
+      if (after && after.status !== before) recovered += 1;
     }
   }
   return recovered;
@@ -591,6 +893,17 @@ export function toContract(job) {
     changedFiles: job.changed_files || null,
     changed_stats: job.changed_stats || null,
     headMoved: job.headMoved ?? null,
+    // 实时进度：用户问「跑哪了」时直接看这个，不用干等
+    transport: job.transport || 'exec',
+    transportWarning: job.transportWarning || null,
+    progress: job.progress
+      ? {
+        turnStatus: job.progress.turnStatus,
+        messageLength: job.progress.messageLength,
+        recent: (job.progress.items || []).slice(-8).map((i) => i.label),
+        updatedAt: job.progress.updatedAt,
+      }
+      : null,
     partialOutput: job.partialOutput || null,
     claims: [], // 引擎不采信 CLI 自报，验收只看 artifacts
     resumeAfter: job.resumeAfter || null,

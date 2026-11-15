@@ -1,11 +1,6 @@
 // Codex CLI 适配：构造 argv（参数存在性探测 + 降级）+ 解析结果。
 import { join } from 'node:path';
-import { codexSandboxOf, probeFlags, hasFlag } from '../models.mjs';
-
-/** .js/.mjs 入口需要用 node 起；.exe/.cmd 直接起。 */
-export function launcher(entry) {
-  return /\.(js|mjs|cjs)$/i.test(entry || '') ? [process.execPath, entry] : [entry];
-}
+import { codexSandboxOf, probeFlags, hasFlag, launcherFor } from '../models.mjs';
 
 /**
  * 构造 codex exec 的 argv。
@@ -16,7 +11,7 @@ export function launcher(entry) {
 export function buildArgv(ctx) {
   const { effort, sandbox, modelInfo, entry, runDir, gitRepo = true } = ctx;
   const flags = probeFlags('codex', entry);
-  const head = launcher(entry);
+  const head = launcherFor(entry);
 
   const argv = [
     ...head, 'exec', '--json', '--ephemeral', '--color', 'never',

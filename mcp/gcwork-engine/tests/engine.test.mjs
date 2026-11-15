@@ -93,7 +93,8 @@ test('codexSandboxOf / claudePermissionOf', () => {
   assert.equal(models.codexSandboxOf('read-only'), 'read-only');
   assert.equal(models.codexSandboxOf('workspace-write'), 'workspace-write');
   assert.equal(models.claudePermissionOf('read-only'), 'plan');
-  assert.equal(models.claudePermissionOf('workspace-write'), 'dontAsk');
+  // dontAsk 只放行预先授权的工具，不等于允许写；可写任务必须用 acceptEdits
+  assert.equal(models.claudePermissionOf('workspace-write'), 'acceptEdits');
 });
 
 // ---------------------------------------------------------------- 适配器 argv + 探测降级
@@ -288,7 +289,7 @@ test('list_jobs / health 返回结构', () => {
   assert.ok(Array.isArray(list));
   const h = models.health();
   assert.ok(h.sides && h.sides.codex && h.sides.claude);
-  assert.equal(h.version, '2.1.1');
+  assert.equal(h.version, '2.2.0');
 });
 
 // ---------------------------------------------------------------- 回归：外部审计发现的 4 个 bug
@@ -683,6 +684,34 @@ test('BUG-K 回归：台账损坏时不判 stale（不能凭坏文件抢锁）',
   assert.equal(ledger.getJobStatus('corrupt-job').state, 'corrupt');
   const r = await dispatch.dispatch({ task_id: 'x', prompt: 'p', workdir: wd, role: 'implementer' });
   assert.equal(r.status, 'busy', '台账损坏时不能抢锁');
+});
+
+test('BUG-L 回归：Claude 可写任务用 acceptEdits，不是 dontAsk', () => {
+  // dontAsk 只放行预先授权的工具，不等于允许写工作区
+  assert.equal(models.claudePermissionOf('workspace-write'), 'acceptEdits');
+  assert.equal(models.claudePermissionOf('read-only'), 'plan');
+});
+
+test('BUG-M 回归：npm 通过 npm-cli.js 启动，不裸 spawn npm', () => {
+  const cli = models.findNpmCli();
+  // 本机应能定位到 npm-cli.js；定位不到时 verify 会退回裸 npm（不报错）
+  assert.ok(cli === null || cli.endsWith('npm-cli.js'), `实际 ${cli}`);
+  if (cli) assert.ok(existsSync(cli), '定位到的 npm-cli.js 必须存在');
+});
+
+test('BUG-N 回归：launcherFor 正确处理 .js / .exe / .cmd', () => {
+  const js = models.launcherFor('C:/x/codex.js');
+  assert.equal(js[0], process.execPath, '.js 应用 node 起');
+  assert.equal(js[1], 'C:/x/codex.js');
+
+  const exe = models.launcherFor('C:/x/claude.exe');
+  assert.deepEqual(exe, ['C:/x/claude.exe'], '.exe 直接起');
+
+  if (process.platform === 'win32') {
+    const cmd = models.launcherFor('C:/x/npm.cmd');
+    assert.equal(cmd.length, 3, '.cmd 在 Windows 需走 cmd /c');
+    assert.equal(cmd[1], '/c');
+  }
 });
 
 // ---------------------------------------------------------------- 契约

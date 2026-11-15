@@ -1,10 +1,5 @@
 // Claude CLI 适配：构造 argv（参数存在性探测 + 降级）+ 解析 JSON 结果。
-import { claudePermissionOf, probeFlags, hasFlag } from '../models.mjs';
-
-/** .js/.mjs 入口需要用 node 起；.exe/.cmd 直接起。 */
-export function launcher(entry) {
-  return /\.(js|mjs|cjs)$/i.test(entry || '') ? [process.execPath, entry] : [entry];
-}
+import { claudePermissionOf, probeFlags, hasFlag, launcherFor } from '../models.mjs';
 
 /**
  * 构造 claude -p 的 argv。
@@ -14,7 +9,7 @@ export function launcher(entry) {
 export function buildArgv(ctx) {
   const { prompt, effort, sandbox, modelInfo, entry, add_dir = null, resume = null } = ctx;
   const flags = probeFlags('claude', entry);
-  const head = launcher(entry);
+  const head = launcherFor(entry);
 
   const argv = [
     ...head, '-p', prompt,

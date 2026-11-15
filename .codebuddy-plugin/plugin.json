@@ -1,6 +1,6 @@
 {
   "name": "gcwork",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Connects the local Codex and Claude Code to WorkBuddy via a thin expert + MCP engine. Natural-language dispatch, uniform routing, artifact verification, and half-automatic resume — survives the 9-minute host timeout by running detached.",
   "author": {
     "name": "Jike",

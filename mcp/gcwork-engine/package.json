@@ -1,6 +1,6 @@
 {
   "name": "gcwork-engine",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "type": "module",
   "description": "GCwork 极简专家背后的 MCP 引擎：统一契约派发 Codex/Claude CLI，抗宿主超时、产物验收、半自动续跑。零运行时依赖。",
   "bin": {

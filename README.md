@@ -2,10 +2,11 @@
 
 Codex/Claude协作专家。不写业务代码——判断任务难度、写简报、派单、验收、汇报。
 
-## 架构（2.1.1：两层）
+## 架构（2.2.0：两层）
 
 - **薄专家层** `agents/gcwork.md`：只有人设、前置条件、怎么用工具、汇报格式。不含契约、路由、CLI 适配逻辑。
 - **MCP 引擎** `mcp/gcwork-engine/`：零依赖 Node stdio MCP server，统一派发、路由、产物解析、验收、续跑。所有判断逻辑都在这里。
+- **执行通道**：Codex 走常驻 `app-server`（`thread/start` → `turn/start`，受理毫秒级、进度实时），起不来自动降级 `codex exec`；Claude 走 `claude -p`。
 
 两层之间靠 **MCP 工具的 input/output schema 即契约**，模型调前可读，不需要把契约写进文档。
 
@@ -44,7 +45,7 @@ node server.mjs        # 作为 MCP server 启动（stdio）
 
 ## 安装
 
-从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.1.1.zip`，解压放到本地市场：
+从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.2.0.zip`，解压放到本地市场：
 
 ```
 ~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/
@@ -80,7 +81,7 @@ mcp/gcwork-engine/
     engine/ledger.mjs               任务台账持久化
     engine/run.mjs                  detached 子进程 + pid 轮询 + 超时杀树
     engine/errors.mjs               错误分类 + quota 恢复时间解析
-tests/engine.test.mjs              54 项单元 + e2e 测试（node --test，不烧额度）
+tests/engine.test.mjs              57 项单元 + e2e 测试（node --test，不烧额度）
 avatars/expert.png                 专家头像
 LICENSE / CHANGELOG.md
 ```

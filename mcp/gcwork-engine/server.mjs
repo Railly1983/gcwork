@@ -3,12 +3,13 @@
 // 传输遵循 MCP 标准：输出为逐行 JSON（newline-delimited）；输入兼容逐行 JSON 与
 // Content-Length 帧两种写法（后者仅用于兼容自测客户端，标准客户端走逐行）。
 // 启动即回收孤儿 job；按需提供 dispatch/status/resume/verify/health/list_jobs。
-import { dispatch, status, resume, recoverOrphans, listJobsTool } from './src/dispatch.mjs';
+import { dispatch, status, resume, recoverOrphans, listJobsTool, warmUpAppServer } from './src/dispatch.mjs';
 import { verify } from './src/verify.mjs';
 import { health } from './src/models.mjs';
 import { TOOLS } from './src/schema.mjs';
+import { shutdownAppServer } from './src/engine/appserver.mjs';
 
-const SERVER_INFO = { name: 'gcwork-engine', version: '2.1.1' };
+const SERVER_INFO = { name: 'gcwork-engine', version: '2.2.0' };
 
 // ---------------------------------------------------------------- 收发
 // 输出：MCP 标准逐行 JSON（每条消息一行，UTF-8，以 \n 结尾）。
@@ -125,7 +126,13 @@ async function dispatchRpc(msg) {
 let recovered = false;
 function onData(chunk) {
   buf = Buffer.concat([buf, chunk]);
-  if (!recovered) { recovered = true; try { recoverOrphans(); } catch { /* 忽略 */ } }
+  if (!recovered) {
+    recovered = true;
+    try { recoverOrphans(); } catch { /* 忽略 */ }
+    // 预热 app-server：用户第一次派单时省掉冷启动（约 3 秒）。
+    // 失败没有副作用——dispatch 会自行降级到 exec。
+    warmUpAppServer().catch(() => { /* 忽略 */ });
+  }
   const messages = extractMessages();
   for (const m of messages) {
     if (m.id === undefined && m.method && m.method.startsWith('notifications/')) continue;
@@ -134,8 +141,15 @@ function onData(chunk) {
 }
 
 process.stdin.on('data', onData);
-process.stdin.on('end', () => { /* 客户端断开 */ });
+process.stdin.on('end', () => {
+  // 客户端断开：收掉常驻 app-server，避免留下孤儿进程
+  try { shutdownAppServer(); } catch { /* 忽略 */ }
+});
 process.stdin.resume();
+
+process.on('exit', () => { try { shutdownAppServer(); } catch { /* 忽略 */ } });
+process.on('SIGTERM', () => { try { shutdownAppServer(); } catch { /* 忽略 */ } process.exit(0); });
+process.on('SIGINT', () => { try { shutdownAppServer(); } catch { /* 忽略 */ } process.exit(0); });
 
 // 兜底：不让未捕获异常杀掉 server，但要留痕，否则故障不可见。
 process.on('uncaughtException', (e) => {

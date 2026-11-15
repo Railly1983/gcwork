@@ -1,5 +1,40 @@
 # 修订记录
 
+## 2.2.0 — 2026-11-16
+
+**派单通道从「每单起一个 codex exec 进程」换成「常驻 codex app-server」。**
+
+### 为什么换
+
+原来每派一单都要新起 `codex exec`，光进程启动就 2–5 秒，中间没有任何进度，用户只能干等。app-server 是 codex 官方的常驻 JSON-RPC 服务，thread 建一次反复用，`turn/start` 受理在毫秒级，过程通过通知流实时可见。
+
+实测（codex-cli 0.166.0，本机）：
+
+| 环节 | 改造前 | 改造后 |
+|---|---:|---:|
+| 派单返回 | 5–10 秒（进程启动 + 无进度） | 首单 ~2.7 秒，之后 **340ms** |
+| 进度可见性 | 无 | `item/started`、`delta`、`turn/completed` 实时 |
+| 中断 | 杀进程树 | `turn/interrupt`，不伤共享进程 |
+
+### 变化
+
+- 新增 `src/engine/appserver.mjs`：常驻连接管理、`thread/start`、`turn/start`、`turn/steer`、`turn/interrupt`、通知流解析、断线检测。
+- `dispatch` 优先走 app-server；起不来自动降级 `exec`（`transportWarning` 会说明原因），保证不可用时仍有退路。
+- MCP 启动时后台预热 app-server，省掉用户第一次派单的冷启动。
+- `status` 返回 `progress.recent`，用户问「跑哪了」可以直接看到最近几步，不再干等。
+- 删掉自设的「全局并发 4 单」上限，并发交给宿主与系统调度；只保留同目录写锁（保护文件不被两个写任务同时改）。
+
+### 修复
+
+- **Claude 可写任务权限用错模式**：原先映射成 `dontAsk`，它的语义是「不弹窗、只放行已预先授权的工具」，不等于允许写工作区，编辑操作可能被拒。改为 `acceptEdits`；只读仍是 `plan`。
+- **Windows 上 `npm` 起不来**：`verify` 里直接 `spawnSync('npm')`，而 Windows 的 npm 是 `.cmd`，Node 18.20+ 为堵命令注入（CVE-2024-27980）不再允许无 shell 启动批处理，实测直接 `ENOENT`。改为定位 `npm-cli.js` 用 `node` 启动。
+- 两个适配器里重复的 `launcher` 合并为 `models.launcherFor`，`.cmd` 在 Windows 走 `cmd /c`。
+- 台账进度落盘加节流：`delta` 是逐 token 的，原先每条都写盘，把派单拖慢好几秒。改为关键事件立即写、普通 delta 每 500ms 最多一次。
+
+### 测试
+
+单测 54 → 57 项，新增 Claude 权限、npm 入口、launcher 分派三组回归。
+
 ## 2.1.1 — 2026-11-15
 
 修复外部审计发现的 5 个问题，其中 4 个会直接导致误判或权限越界。

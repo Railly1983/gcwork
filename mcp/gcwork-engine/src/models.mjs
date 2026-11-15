@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 import { dirname, join, basename } from 'node:path';
 import { readdirSync, statSync, readFileSync, existsSync } from 'node:fs';
 
-export const TOOL_VERSION = '2.1.1';
+export const TOOL_VERSION = '2.2.0';
 
 // 思考强度词表（与 CLI 对齐）。
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -124,8 +124,16 @@ export function codexSandboxOf(sandbox) {
   return sandbox === 'read-only' ? 'read-only' : 'workspace-write';
 }
 
+/**
+ * 沙箱语义 → Claude 的 --permission-mode。
+ *
+ * 注意 dontAsk 的语义是「不弹窗，只放行已预先授权的工具」，它**不等于**允许写工作区：
+ * 一个没被授权过的编辑操作照样会被拒。所以可写任务要用 acceptEdits（自动接受文件编辑），
+ * 只读任务用 plan（只做规划，不改文件）。
+ * 参考：claude --help 的 choices: acceptEdits / auto / bypassPermissions / manual / dontAsk / plan
+ */
 export function claudePermissionOf(sandbox) {
-  return sandbox === 'read-only' ? 'plan' : 'dontAsk';
+  return sandbox === 'read-only' ? 'plan' : 'acceptEdits';
 }
 
 // ---------------------------------------------------------------- 模型解析
@@ -284,6 +292,38 @@ export function childEnv(mode) {
 }
 
 // ---------------------------------------------------------------- 入口探测
+
+/**
+ * 找 npm 的入口 js。
+ *
+ * 不能直接 spawn('npm')：Windows 上 npm 是 npm.cmd（批处理），Node 从 18.20 起
+ * 为避免命令注入（CVE-2024-27980）不再允许不带 shell 直接启动批处理，会报 ENOENT/EINVAL。
+ * 所以统一走 `node npm-cli.js`。
+ */
+export function findNpmCli() {
+  const exeDir = dirname(process.execPath);
+  const cands = [
+    join(exeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(exeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(exeDir, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  if (process.env.APPDATA) {
+    cands.push(join(process.env.APPDATA, 'npm', 'node_modules', 'npm', 'bin', 'npm-cli.js'));
+  }
+  return cands.find((p) => existsSync(p)) || null;
+}
+
+/**
+ * 启动 CLI 的 argv 前缀。
+ * .js/.mjs/.cjs 用当前 node 起；.cmd/.bat 走 cmd /c（否则 Windows 会拒绝）；
+ * .exe 及其它直接起。
+ */
+export function launcherFor(entry) {
+  const e = String(entry || '');
+  if (/\.(js|mjs|cjs)$/i.test(e)) return [process.execPath, e];
+  if (/\.(cmd|bat)$/i.test(e) && process.platform === 'win32') return [process.env.ComSpec || 'cmd.exe', '/c', e];
+  return [e];
+}
 
 export function findCodexEntry() {
   if (process.env.GCWORK_CODEX_ENTRY) return process.env.GCWORK_CODEX_ENTRY;
