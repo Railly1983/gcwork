@@ -10,3 +10,8 @@ node_modules/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 测试产物
+gcw_fixture_out.txt
+*.flag
+last.md
