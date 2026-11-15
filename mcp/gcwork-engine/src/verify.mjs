@@ -126,6 +126,11 @@ export async function verify(ref) {
       // 会因此停摆，被判成死任务。测试最长跑 5 分钟，不能堵在这里。
       const r = await new Promise((resolve) => {
         const child = spawn(cmd, args, { cwd: pkgDir, windowsHide: true });
+        // 必须排空输出：不消费 stdout/stderr，管道缓冲写满后子进程会阻塞，
+        // 测试永远不结束，最后被超时误判成失败。
+        let tail = '';
+        child.stdout.on('data', (d) => { tail = (tail + d.toString()).slice(-2000); });
+        child.stderr.on('data', (d) => { tail = (tail + d.toString()).slice(-2000); });
         let done = false;
         const timer = setTimeout(() => {
           if (done) return;
@@ -143,7 +148,7 @@ export async function verify(ref) {
           if (done) return;
           done = true;
           clearTimeout(timer);
-          resolve({ status: code, error: null });
+          resolve({ status: code, error: null, tail });
         });
       });
       testsPassed = r.status === 0;

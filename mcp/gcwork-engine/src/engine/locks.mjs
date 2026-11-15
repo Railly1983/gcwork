@@ -6,7 +6,9 @@ import { join, resolve } from 'node:path';
 import { getJobStatus, locksDir } from './ledger.mjs';
 import { pidAlive } from './run.mjs';
 
-export const HEARTBEAT_STALE_MS = 120_000; // 与 dispatch 判活阈值保持一致 // 心跳超过这个时间算任务已死
+// 心跳阈值。留足余量：gitSnapshot / health 探测这类同步调用在大仓库上
+// 可能占用几十秒，阈值太紧会把正在干活的任务误判成死任务。
+export const HEARTBEAT_STALE_MS = 180_000;
 
 export function lockPathFor(cwd) {
   const h = createHash('sha1').update(resolve(cwd).toLowerCase()).digest('hex').slice(0, 16);

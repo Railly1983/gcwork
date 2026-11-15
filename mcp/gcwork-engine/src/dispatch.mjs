@@ -1,5 +1,5 @@
 // 派发编排：dispatch / status / resume / 验收封装 / listJobs / recoverOrphans。
-// 核心职责：统一契约、detached 执行抗宿主超时、半自动续跑、产物解析、并发与写锁。
+// 核心职责：统一契约、任务在常驻服务内执行、半自动续跑、产物解析、写锁。
 import { randomUUID, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, renameSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -20,8 +20,6 @@ const MAX_PARTIAL = 4000; // partialOutput 截断
 const MAX_PROGRESS_ITEMS = 40; // 进度里保留的最近条目数
 import { HEARTBEAT_STALE_MS } from './engine/locks.mjs'; // 与锁判活共用同一阈值，避免两处不一致
 
-// 进程内活跃任务（用于同目录写锁与状态查询；并发上限交给宿主，不再自己掐）
-const activeJobs = new Set();
 
 // 台账落盘节流：delta 是逐 token 的，每个都写盘会把派单拖慢几秒。
 const PROGRESS_FLUSH_MS = 500;
@@ -176,9 +174,14 @@ export async function dispatch(taskInput = {}) {
   };
   putJob(job);
   putJob(job);
-  activeJobs.add(jobId);
 
-  const spec = { jobId, runDir, cwd: workdir, prompt, model: modelInfo.model, effort: target.effort, sandbox: target.sandbox, timeoutSec, entry, executor: target.cli, gitRepo };
+  // env 必须带进 spec：不带的话执行层拿不到 clean 模式，schema 承诺就成了空话
+  const spec = {
+    jobId, runDir, cwd: workdir, prompt,
+    model: modelInfo.model, effort: target.effort, sandbox: target.sandbox,
+    timeoutSec, entry, executor: target.cli, gitRepo,
+    env: task.env || 'inherit',
+  };
   const specPath = join(runDir, 'spec.json');
   writeFileSync(specPath, JSON.stringify(spec, null, 2), 'utf8');
 
@@ -209,26 +212,17 @@ export function finalizeFromJob(jobId) {
   const limit = Number(job.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const elapsedMs = job.startedAt ? Date.now() - Date.parse(job.startedAt) : 0;
 
-  // 有独立进程的任务：优先按进程死活判。进程已退出就走 finalize，
-  // 由产物与 mtime 决定真实终态——不能因为「查询得晚」就判超时。
-  if (job.pid) {
-    if (!pidAlive(job.pid)) return finalize(job);
-    if (elapsedMs >= limit * 1000) {
-      killJob(job.pid);
-      markTimedOut(job.runDir);
-      return finalize(job);
-    }
-    return job;
-  }
-
-  // 进程内任务（跑在常驻 MCP 里）：没有独立 pid，只能靠心跳。
+  // 判活靠心跳，绝不按 pid 杀进程：任务跑在常驻 MCP 进程里，job.pid
+  // 就是服务自身的 pid，杀了等于把引擎和所有并行任务一起干掉。
+  // pid 只用来判断「执行进程是否已经结束」——结束就按产物定终态，
+  // 不能因为查询得晚就把按时完成的任务判成超时。
+  if (job.pid && !pidAlive(job.pid)) return finalize(job);
   const lastBeat = job.heartbeatAt
     ? Date.parse(job.heartbeatAt)
     : (job.startedAt ? Date.parse(job.startedAt) : Date.now());
   const hbAge = Date.now() - lastBeat;
 
   if (elapsedMs >= limit * 1000) {
-    // 超时只落标记，不动任何进程：执行方自己会在 deadline 发 turn/interrupt。
     markTimedOut(job.runDir);
     return finalize(job);
   }
@@ -361,7 +355,6 @@ export function finalize(job) {
   }
 
   putJob(updated);
-  activeJobs.delete(job.job_id);
 
   // 只有确认进程已退出才释放锁；还活着就留着，防止同目录并发写。
   if (!stillAlive) {

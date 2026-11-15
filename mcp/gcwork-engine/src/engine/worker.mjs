@@ -1,7 +1,6 @@
-// 单个任务的执行器。由 CLI 以 detached 方式拉起，跑完即退出。
+// 单个任务的执行器。由 CLI 或 MCP 服务端在进程内调用，跑完返回。
 //
-// 为什么单独一个进程：CLI 每次调用都是短命进程，如果任务跑在 CLI 里，
-// CLI 一退出任务就断了。detached worker 独立存活，CLI 只管派单和查状态。
+// MCP 模式下任务跑在宿主常驻的服务进程里，不受宿主轮次与 Bash 超时影响。
 //
 // 一个 worker 对应一个 job：起 app-server → thread/start → turn/start →
 // 收通知流写台账 → 终态落盘 → 退出。
@@ -285,7 +284,8 @@ function finish(spec, route, runDir) {
   let status;
   if (route.status === 'interrupted') status = 'timeout';
   else if (route.status === 'failed') status = route.error ? mapError(route.error) : 'failed';
-  else if (route.status === 'completed') status = message ? 'ok' : 'crashed';
+  // 完成但没有文字输出是正常的（只改文件、不做总结），不能判成崩溃
+  else if (route.status === 'completed') status = 'ok';
   else status = 'crashed';
 
   const before = snapshotFromJSON(job.before_snapshot);

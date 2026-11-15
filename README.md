@@ -6,7 +6,7 @@ Codex/Claude协作专家。不写业务代码——判断任务难度、写简�
 
 - **薄专家层** `agents/gcwork.md`：只有人设、前置条件、怎么用工具、汇报格式。不含契约、路由、CLI 适配逻辑。
 - **MCP 引擎** `mcp/gcwork-engine/`：零依赖 Node stdio MCP server，统一派发、路由、产物解析、验收、续跑。所有判断逻辑都在这里。
-- **执行通道**：Codex 走常驻 `app-server`（`thread/start` → `turn/start`，受理毫秒级、进度实时），起不来自动降级 `codex exec`；Claude 走 `claude -p`。
+- **执行通道**：Codex 走常驻 `app-server`（`thread/start` → `turn/start`，受理毫秒级、进度实时），；Claude 走 `claude -p` 一次性子进程。
 
 两层之间靠 **MCP 工具的 input/output schema 即契约**，模型调前可读，不需要把契约写进文档。
 
@@ -15,7 +15,7 @@ Codex/Claude协作专家。不写业务代码——判断任务难度、写简�
 把本机安装好的 Codex 和 Claude Code 接入 WorkBuddy。自然语言对话即可调用，引擎统一路由到合适的 CLI、验收产物、失败后续跑。
 
 - 支持 Astra / Sol / Terra / Luna / Fable / Opus / Sonnet / Haiku 8 个模型，low / medium / high / xhigh / max 五档思考强度。
-- 三个角色画像：`planner`（只读规划）/ `implementer`（执行）/ `reviewer`（审查）。不确定就传 `executor:"auto"` 让引擎路由。
+- 三个角色画像：`planner`（只读规划）/ `implementer`（执行）/ `reviewer`（审查）。沙箱默认放开可写，只有 `planner` 或显式传 `sandbox:"read-only"` 才只读。
 
 ## 怎么用
 
@@ -27,7 +27,7 @@ Codex/Claude协作专家。不写业务代码——判断任务难度、写简�
 - **验收**：`verify`（只看 git 改动范围、敏感文件、测试结果，不采信 CLI 自报完成）。
 - **自检**：`health`（两侧是否安装并登录、各角色模型解析、计费风险）。
 
-派单用 **detached 进程**跑，宿主轮次上限（9 分钟）杀不到它——不用自己掐表，也不用为它拆单。
+派单跑在**宿主常驻的 MCP 进程**里，不受宿主轮次上限和 Bash 调用超时影响——不用自己掐表，也不用为它拆单。
 
 ## 前提
 
@@ -92,13 +92,13 @@ mcp/gcwork-engine/
     dispatch.mjs                   派发编排：dispatch/status/resume/契约输出/写锁/并发
     verify.mjs                     独立验收（git 范围 + 敏感文件 + 测试）
     schema.mjs                     MCP 工具声明（即契约）
-    adapters/codex.mjs              Codex CLI 适配（参数探测降级 + 结果解析）
+    adapters/codex.mjs              Codex CLI 适配（结果解析；执行走 app-server）
     adapters/claude.mjs             Claude CLI 适配
     engine/git.mjs                  git 快照与变更计算
     engine/ledger.mjs               任务台账持久化
-    engine/run.mjs                  detached 子进程 + pid 轮询 + 超时杀树
+    engine/run.mjs                  进程存活探测与超时标记
     engine/errors.mjs               错误分类 + quota 恢复时间解析
-tests/engine.test.mjs              57 项单元 + e2e 测试（node --test，不烧额度）
+tests/engine.test.mjs              51 项单元测试（node --test，不烧额度）
 avatars/expert.png                 专家头像
 LICENSE / CHANGELOG.md
 ```
@@ -113,13 +113,13 @@ cd mcp/gcwork-engine && node --test tests/engine.test.mjs
 
 ## 已知限制
 
-- **宿主 9 分钟轮次上限已绕过**。派单走 detached 进程，宿主杀不到；`status` / `resume` 会主动回收结束的进程并收尾。
+- **宿主轮次上限已绕过**。任务跑在常驻 MCP 进程里，宿主结束轮次不影响它；`status` / `resume` 会主动回收并收尾。
 - **不做长会话续接**。每单都是新会话（Codex `--ephemeral`、Claude `--no-session-persistence`）；续跑靠 `resume` 把上一轮改动清单 + 剩余指令接上。
 - **改动检测靠 git**。工作目录不是 git 仓库时 `changedFiles` 为 `null`，且会在 `gitWarning` 里提示没有回滚保障。
 - **模型名按家族动态解析**。家族不存在报 `MODEL_UNAVAILABLE`，不挑别的模型顶上；读不到 `models_cache` 才用写死名字并给 `warning`。
 - **两个 CLI 是独立额度池**。Codex 四个模型共用一份账号额度，Claude 侧独立；`quota_exhausted` 时结果带 `resumeAfter`。
 - **继承宿主环境变量**。若 `ANTHROPIC_API_KEY` 等被设置，CLI 可能走 API 计费而非订阅额度，此时 `billingWarning` 提示；想强制走 CLI 自身登录，派单传 `env:"clean"`。
-- **并发**：全局上限 4 单，同一目录同时仅一个可写任务（写锁）；只读任务可并行。git worktree 隔离为后续增强。
+- **并发**：不设全局上限，交给宿主与系统调度；同一目录同时仅一个可写任务（写锁）。
 - **CLI 参数存在性探测**：引擎启动时会解析 `CLI --help`，缺哪个参数就省哪个，抗 CLI 版本变更。
 
 ## 许可与变更
