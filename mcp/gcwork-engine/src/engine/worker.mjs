@@ -178,7 +178,9 @@ async function runCodex(spec, route, pushItem, flush, startedAt) {
   await ensureAppServer({ entry });
   // sandbox 必须显式传下去：不传就完全取决于 codex 的本机默认配置，
   // 只读任务可能在可写环境里跑，写任务也可能被拒。
-  const th = await startThread({ cwd, model, sandbox: spec.sandbox, approvalPolicy: 'never' });
+  // 不在 thread 层传 sandbox 字符串（枚举值未确认，传错整个会话起不来）；
+  // 权限统一由 turn 的 sandboxPolicy 表达，结构已对过官方 schema。
+  const th = await startThread({ cwd, model });
   myThread = th.threadId;
   putJob({ ...getJob(jobId), threadId: myThread });
 
@@ -314,11 +316,18 @@ function finish(spec, route, runDir) {
   releaseLock(job.lockPath, jobId);
 }
 
-/** 沙箱语义 → app-server 的 sandboxPolicy 结构。 */
+/**
+ * 沙箱语义 → app-server 的 sandboxPolicy 结构。
+ *
+ * 按官方语义：network_access 只在 workspace-write 下生效，
+ * read-only 模式本来就会拦网络请求，传 networkAccess 也没用。
+ * 但 web_search 是 codex 自己的工具（默认 cached 索引、服务端执行），
+ * 不受沙箱网络限制——所以只读任务照样能搜索。
+ */
 function sandboxPolicyOf(sandbox) {
   return sandbox === 'read-only'
     ? { type: 'readOnly' }
-    : { type: 'workspaceWrite', writableRoots: [], networkAccess: false };
+    : { type: 'workspaceWrite', writableRoots: [], networkAccess: true };
 }
 
 function mapError(text) {

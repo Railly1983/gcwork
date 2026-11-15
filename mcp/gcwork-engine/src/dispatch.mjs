@@ -33,15 +33,15 @@ function nowStamp() {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-/** job_id 里带上模型短名，用户从任务标识就能看出用的什么模型。 */
+/** job_id 只保留模型短名 + 短随机后缀，一眼看出用的什么模型，不堆时间戳。 */
 function newJobId(modelName = null) {
   const tag = String(modelName || '')
     .replace(/^gpt-[\d.]+-/i, '')   // gpt-6.1-sol -> sol
     .replace(/[^a-z0-9]/gi, '')
     .slice(0, 12)
     .toLowerCase();
-  const tail = randomUUID().slice(0, 8);
-  return tag ? `${nowStamp()}-${tag}-${tail}` : `${nowStamp()}-${tail}`;
+  const tail = randomUUID().slice(0, 6);
+  return tag ? `${tag}-${tail}` : `job-${tail}`;
 }
 
 function truncate(s, max) {
