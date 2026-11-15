@@ -72,18 +72,6 @@
     }
   ],
   "dependencies": {
-    "mcpServers": {
-      "gcwork-engine": {
-        "type": "stdio",
-        "command": "node",
-        "args": [
-          "mcp/gcwork-engine/server.mjs"
-        ],
-        "runtime": {
-          "type": "node",
-          "version": ">=18.0.0"
-        }
-      }
-    }
+    "mcpServers": "./.mcp.json"
   }
 }
