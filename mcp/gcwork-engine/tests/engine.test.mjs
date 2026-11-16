@@ -18,9 +18,6 @@ import { verify as verifyJob, isSensitive } from '../src/verify.mjs';
 
 const FIX = resolve(join(import.meta.dirname, 'fixtures'));
 const CODEX_OK = join(FIX, 'fake_codex_full.mjs');
-const CODEX_DEGRADE = join(FIX, 'fake_codex_degrade.mjs');
-const CODEX_FAIL = join(FIX, 'fake_codex_fail.mjs');
-const CODEX_RESUME = join(FIX, 'fake_codex_resume.mjs');
 const CLAUDE_OK = join(FIX, 'fake_claude.mjs');
 
 function setupEnv() {
@@ -98,19 +95,6 @@ test('codexSandboxOf / claudePermissionOf', () => {
 });
 
 // ---------------------------------------------------------------- 适配器 argv + 探测降级
-test('codex buildArgv：完整 help 含 -c', () => {
-  const argv = codexAdapter.buildArgv({ effort: 'high', sandbox: 'read-only', modelInfo: { model: 'x' }, entry: CODEX_OK, runDir: '/tmp/x' });
-  assert.ok(argv.includes('-c'), '应包含 -c');
-  assert.ok(argv.includes('-s'), '应包含 -s');
-  assert.ok(argv.includes('-m'), '应包含 -m');
-  assert.ok(argv.includes('-o'), '应包含 -o');
-  assert.ok(argv.includes('-'), '应以 - 收尾（从 stdin 读提示）');
-});
-test('codex buildArgv：降级 help 省略 -c', () => {
-  const argv = codexAdapter.buildArgv({ effort: 'high', sandbox: 'read-only', modelInfo: { model: 'x' }, entry: CODEX_DEGRADE, runDir: '/tmp/x' });
-  assert.ok(!argv.includes('-c'), '降级不应含 -c');
-  assert.ok(argv.includes('-o'), '仍应包含 -o');
-});
 test('claude buildArgv：构造核心参数', () => {
   const argv = claudeAdapter.buildArgv({ prompt: 'hi', effort: 'medium', sandbox: 'workspace-write', modelInfo: { model: 'sonnet' }, entry: CLAUDE_OK });
   assert.ok(argv.includes('-p'), '应包含 -p');

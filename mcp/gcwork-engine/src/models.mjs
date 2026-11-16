@@ -504,13 +504,53 @@ export function health() {
   if (codex.installed && codex.login === false) warnings.push('codex 未登录，需要用户自行登录');
   if (claude.installed && claude.login === false) warnings.push('claude 未登录，需要用户自行登录');
 
+  // 阻塞项：给人话 + 明确的下一步动作，模型可以直接转述给用户。
+  // 连接器本身不在这里判——能调到 health 就说明连接器通了；
+  // 调不到工具是连接器没连，由专家提示词负责引导。
+  const blockers = [];
+  if (!codex.installed && !claude.installed) {
+    blockers.push({
+      item: 'executor',
+      message: '本机没找到 codex，也没找到 claude，没有可派的执行器。',
+      action: '装一个并登录：Codex CLI（npm i -g @openai/codex）或 Claude Code（npm i -g @anthropic-ai/claude-code），装完各跑一次登录。',
+    });
+  } else {
+    if (codex.installed && codex.login === false) {
+      blockers.push({
+        item: 'codex-login',
+        message: 'codex 已安装但未登录。',
+        action: '在终端运行 `codex login` 完成授权后重试。',
+      });
+    }
+    if (claude.installed && claude.login === false) {
+      blockers.push({
+        item: 'claude-login',
+        message: 'claude 已安装但未登录。',
+        action: '在终端运行 `claude` 走一次登录流程后重试。',
+      });
+    }
+  }
+  for (const m of models) {
+    if (m.error === 'QUOTA_EXHAUSTED') {
+      blockers.push({
+        item: 'quota',
+        message: `${m.cli} 的额度已用尽。`,
+        action: '换另一个执行器（executor 传 codex 或 claude），或等额度恢复。',
+      });
+      break;
+    }
+  }
+
   return {
     ok: codex.ok || claude.ok,
+    ready: blockers.length === 0,
     version: TOOL_VERSION,
+    connector: 'ok（能调到本工具即说明 gcwork-engine 连接器已连通）',
     sides: {
       codex: { ...codex, billingEnv: billingRisks('codex') },
       claude: { ...claude, billingEnv: billingRisks('claude') },
     },
+    blockers,
     warnings,
     roles,
     models,
