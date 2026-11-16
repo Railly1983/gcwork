@@ -256,21 +256,25 @@ async function runClaude(spec, route, pushItem, flush) {
     flush(true);
   });
 
-  await new Promise((resolve) => {
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
+  const exitCode = await new Promise((resolve) => {
+    child.on('close', (code) => resolve(code));
+    child.on('error', () => resolve(null));
   });
 
   if (route.status === 'running') {
     const r = claudeRead(out);
     route.messageBuf = r.message || '';
     route.usage = r.usage || null;
+    // 判失败要看三件事：JSON 里 is_error、进程退出码、有没有只剩 stderr 的错误。
+    // 只看 is_error 会漏掉「非零退出但无 stdout」这种最常见的情况。
     if (r.isError) {
       route.status = 'failed';
       route.error = String(r.message || 'Claude 报错');
+    } else if (typeof exitCode === 'number' && exitCode !== 0) {
+      route.status = 'failed';
+      route.error = `claude 退出码 ${exitCode}${err.trim() ? `：${err.trim().slice(-500)}` : ''}`;
     } else {
       // 没有文字输出不代表失败：只改文件、不做总结是正常行为。
-      // 真正的失败会以 is_error 或非零退出码体现。
       route.status = 'completed';
     }
     pushItem(route.status === 'completed' ? '执行结束' : '执行失败');
@@ -314,7 +318,11 @@ function finish(spec, route, runDir) {
     status,
     summary: finalSummary,
     // 成功时回显开头，失败时保留诊断篇幅；全文在 message.md
-    partialOutput: truncate(message || route.error || '（无输出）', status === 'ok' ? 800 : 3000),
+    // 失败时错误优先：message 可能只是失败前的半截进度，拿它当诊断依据会误导
+    partialOutput: truncate(
+      status === 'ok' ? (message || '（无输出）') : (route.error || message || '（无输出）'),
+      status === 'ok' ? 800 : 3000,
+    ),
     changed_files: changedFiles,
     changed_stats: delta ? delta.stats : null,
     headMoved,

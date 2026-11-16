@@ -425,11 +425,18 @@ export function listWithSession(limit = 20) {
   let session = null;
   try {
     const s = readSessionNotes();
+    // 一行派单、一行收尾，同一单会占两行。按 job_id 去重才是真实单数，
+    // 否则 3 单就被算成 6 单，提醒来得太早。
+    const ids = new Set();
+    for (const l of s.lines) {
+      const m = l.match(/\b([a-z][a-z0-9]*-[a-f0-9]{6})\b/i);
+      if (m) ids.add(m[1].toLowerCase());
+    }
     session = {
       day: s.day,
-      count: s.lines.length,
+      count: ids.size,
       recent: s.lines.slice(-8),
-      advice: s.lines.length >= 6
+      advice: ids.size >= 6
         ? '今天在这个对话里已经派了 6 单以上，历史越长每轮越贵。建议先把进度压成摘要再开新对话——要我写吗？'
         : null,
     };
