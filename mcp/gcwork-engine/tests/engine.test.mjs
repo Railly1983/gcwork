@@ -601,3 +601,56 @@ test('schema：6 个工具且含契约字段', () => {
   assert.ok(dispatchTool.inputSchema.required.includes('prompt'));
   assert.ok(dispatchTool.inputSchema.required.includes('workdir'));
 });
+
+test('BUG-P 回归：app-server 无 stdout 时从 events.jsonl 取回结果与错误', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  // 模拟 worker 被宿主杀掉：没有 stdout.log，只有落盘的事件流
+  writeFileSync(join(runDir, 'events.jsonl'), [
+    JSON.stringify({ type: 'progress', label: '开始执行' }),
+    JSON.stringify({ type: 'event', method: 'item/completed', params: { item: { type: 'agentMessage', text: '已审查 3 个文件' } } }),
+    JSON.stringify({ type: 'event', method: 'turn/completed', params: { turn: { status: 'failed', error: { message: 'network unreachable' } } } }),
+  ].join('\n') + '\n');
+  ledger.putJob({
+    job_id: 'codex-ev', task_id: 'tev', workdir: wd, status: 'running',
+    pid: 999999, executor: 'codex', startedAt: new Date().toISOString(),
+    timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
+  });
+  const r = dispatch.finalize(ledger.getJob('codex-ev'));
+  assert.notEqual(r.status, 'ok', '有 turn 错误不能判成功');
+  assert.match(String(r.partialOutput), /network unreachable/, '错误文本必须从事件流里捞回来');
+});
+
+test('BUG-Q 回归：进程被杀且无任何输出时，partialOutput 不能是空泛的「无输出」', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  ledger.putJob({
+    job_id: 'codex-silent', task_id: 'tsi', workdir: wd, status: 'running',
+    pid: 999999, executor: 'codex', startedAt: new Date().toISOString(),
+    timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
+    progress: { items: [{ label: '开始执行' }, { label: '执行中：reasoning' }], turnStatus: 'running' },
+  });
+  const r = dispatch.finalize(ledger.getJob('codex-silent'));
+  assert.ok(r.partialOutput && r.partialOutput.length > 10, '失败必须有可读诊断');
+  assert.match(String(r.partialOutput), /resume|退出|中断/, '诊断要指出下一步，不能只是一个状态词');
+});
+
+test('BUG-R 回归：finalize 后 progress.turnStatus 必须与终态一致', () => {
+  setupEnv();
+  const wd = makeGitWorkdir();
+  const after = gitSnapshot(wd);
+  const runDir = mkdtempSync(join(tmpdir(), 'gcw-run-'));
+  ledger.putJob({
+    job_id: 'codex-stale', task_id: 'tst', workdir: wd, status: 'running',
+    pid: 999999, executor: 'codex', startedAt: new Date().toISOString(),
+    timeoutSec: 600, runDir, before_snapshot: snapshotToJSON(after),
+    progress: { items: [], turnStatus: 'running' },
+  });
+  const r = dispatch.finalize(ledger.getJob('codex-stale'));
+  assert.notEqual(r.progress?.turnStatus, 'running', '终态不能留着 running，否则调用方会一直空转');
+  assert.equal(r.progress?.turnStatus, r.status);
+});

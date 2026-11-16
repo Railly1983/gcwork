@@ -131,10 +131,21 @@ export async function runJob(spec) {
 
 /** codex：走常驻 app-server，进度靠通知流。 */
 async function runCodex(spec, route, pushItem, flush, startedAt) {
-  const { jobId, cwd, prompt, model, effort, timeoutSec, entry } = spec;
+  const { jobId, cwd, prompt, model, effort, timeoutSec, entry, runDir } = spec;
 
   let myThread = null;
   let myTurn = null;
+
+  // app-server 不产生 stdout，finalize 读 stdout.log 永远是空——
+  // 失败时只能靠这里把事件流落盘，否则诊断信息全丢（现象：failed + error=null）。
+  const evLog = (obj) => {
+    try {
+      appendFileSync(join(runDir, 'events.jsonl'), `${JSON.stringify(obj)}\n`, 'utf8');
+    } catch { /* 落盘失败不影响执行 */ }
+  };
+
+  const origPushItem = pushItem;
+  pushItem = (label) => { origPushItem(label); evLog({ type: 'progress', at: new Date().toISOString(), label }); };
   // 严格路由：自己的 thread 还没确定之前不收任何事件，否则别的任务的
   // 消息会混进来，导致提前判完成或串内容。
   subscribe(({ method, params }) => {
@@ -146,6 +157,11 @@ async function runCodex(spec, route, pushItem, flush, startedAt) {
     if (tTurn && myTurn && tTurn !== myTurn) return;
     if (!tid && !tTurn) return;
     if (myThread && !tid && myTurn && !tTurn) return;
+
+    // 原始事件留档：只记关键几类，避免把 delta 的每个字都写进磁盘
+    if (!/delta$/.test(method)) {
+      evLog({ type: 'event', at: new Date().toISOString(), method, params });
+    }
 
     if (method === 'turn/started') {
       if (params.turnId || params.turn?.id) myTurn = myTurn || params.turnId || params.turn.id;

@@ -250,6 +250,40 @@ export function finalizeFromJob(jobId) {
   return job;
 }
 
+/**
+ * 从 worker 落盘的 events.jsonl 里取结果。
+ * app-server 传输没有 stdout，进程被杀（宿主重启、服务退出）时这是唯一线索。
+ */
+function readCodexEvents(runDir) {
+  const raw = readArtifact(runDir, 'events.jsonl');
+  if (!raw) return {};
+  let message = '';
+  let error = null;
+  let usage = null;
+  for (const line of raw.split(/\r?\n/)) {
+    const s = line.trim();
+    if (!s) continue;
+    let ev;
+    try { ev = JSON.parse(s); } catch { continue; }
+    if (ev.type !== 'event') continue;
+    const p = ev.params || {};
+    if (ev.method === 'item/completed' && p.item?.type === 'agentMessage' && p.item.text) {
+      message = String(p.item.text);
+    } else if (ev.method === 'item/agentMessage/delta' && p.delta) {
+      message += String(p.delta);
+    } else if (ev.method === 'turn/completed') {
+      if (p.usage) usage = p.usage;
+      const st = p.turn?.status || p.status;
+      if (st && st !== 'completed') {
+        error = p.turn?.error?.message || p.error?.message || `turn 状态：${st}`;
+      }
+    } else if (ev.method === 'turn/failed' || ev.method === 'error') {
+      error = p.error?.message || p.message || 'turn 失败';
+    }
+  }
+  return { message, error, usage };
+}
+
 /** pid 已死或超时 → 解析产物、定状态、落盘。 */
 export function finalize(job) {
   const runDir = job.runDir;
@@ -269,6 +303,12 @@ export function finalize(job) {
     message = r.message;
     usage = r.usage;
     cliError = r.error;
+    // app-server 传输不写 stdout.log，进程被杀时结果只能从 events.jsonl 里捞：
+    // 最后一条 agentMessage 是已有回答，任何 error/turn.failed 是真错误。
+    const ev = readCodexEvents(runDir);
+    if (!message && ev.message) message = ev.message;
+    if (!cliError && ev.error) cliError = ev.error;
+    if (!usage && ev.usage) usage = ev.usage;
   } else {
     const r = claudeRead(stdout);
     message = r.message;
@@ -309,11 +349,28 @@ export function finalize(job) {
   }
 
   // partialOutput：失败也非空，给专家/用户续跑的抓手
+  // 失败时错误优先：message 往往只是失败前的半截进度，拿它当诊断依据会误导
   let partialOutput = hasMessage ? message : '';
+  if (status !== 'ok' && cliError) {
+    partialOutput = hasMessage
+      ? `${cliError}\n\n--- 失败前的输出 ---\n${message}`
+      : cliError;
+  }
   if (!partialOutput) {
     partialOutput = (cliError || '').trim() || stdout;
   }
-  if (!partialOutput) partialOutput = '（无输出）';
+  if (!partialOutput) {
+    // 什么都不剩时也要说清为什么——「failed + 空」等于没有诊断，
+    // 上一轮就是这么把「宿主重启杀掉 worker」误当成任务本身出错。
+    const j = getJob(job.job_id);
+    const lastItems = (j?.progress?.items || []).slice(-3).map((x) => x.label);
+    partialOutput = [
+      `执行进程在收尾前退出，没有留下输出（${status}）。`,
+      '常见原因：宿主重启或 MCP 服务退出，把跑在进程内的 worker 一起带走。',
+      lastItems.length ? `最后进度：${lastItems.join(' → ')}` : '',
+      '建议：resume 同一 task_id 续跑，已完成的文件改动会保留。',
+    ].filter(Boolean).join('\n');
+  }
 
   const changedFiles = delta ? delta.paths : [];
   const changedStats = delta ? delta.stats : null;
@@ -353,6 +410,14 @@ export function finalize(job) {
     git_warning: gitWarnings.length ? gitWarnings.join('；') : null,
     exit_code: null, // detached 跨进程难可靠取退出码，状态以产物推断为准
     degraded: job.modelWarning ? { reason: job.modelWarning } : null,
+    // 终态覆盖掉 worker 留下的 running：进程被杀时 turnStatus 永远停在 running，
+    // 不清掉的话调用方看到「failed 但 turnStatus=running」会以为还在跑，去反复 status 空转。
+    progress: {
+      ...(job.progress || {}),
+      items: (job.progress?.items || []).slice(-40),
+      turnStatus: status,
+      updatedAt: endedAt,
+    },
     artifacts: {
       changed_files: join(runDir, 'changed.txt'),
       diff_path: diff ? join(runDir, 'diff.txt') : null,
