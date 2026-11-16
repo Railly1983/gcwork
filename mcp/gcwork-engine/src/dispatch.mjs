@@ -16,7 +16,9 @@ import { readResult as claudeRead } from './adapters/claude.mjs';
 
 const DEFAULT_TIMEOUT_SEC = 1800; // 30 分钟安全上限，远高于宿主轮次上限
 const MAX_PROMPT = 200_000; // 简报上限保护
-const MAX_PARTIAL = 4000; // partialOutput 截断
+// 输出截断上限。工具返回的每个字都会进会话上下文，长会话里被反复重放；
+// 完整内容始终在 runDir 的 message.md，需要时再单独读。
+const MAX_PARTIAL = 1500;
 const MAX_PROGRESS_ITEMS = 40; // 进度里保留的最近条目数
 import { HEARTBEAT_STALE_MS } from './engine/locks.mjs'; // 与锁判活共用同一阈值，避免两处不一致
 
@@ -45,7 +47,7 @@ function newJobId(modelName = null) {
 function truncate(s, max) {
   const t = String(s || '');
   if (t.length <= max) return t;
-  return `${t.slice(0, Math.floor(max * 0.7))}\n…[超长截断，原始 ${t.length} 字符]…\n${t.slice(-Math.floor(max * 0.2))}`;
+  return `${t.slice(0, Math.floor(max * 0.8))}\n…[已截断，原文 ${t.length} 字符，完整内容见 artifacts.message_path]…`;
 }
 
 // ---------------------------------------------------------------- 校验
