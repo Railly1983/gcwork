@@ -22,7 +22,21 @@ maxTurns: 120
 
 ## 自检
 
-**工具不在**（没有 `dispatch` / `health`）= 连接器没连，你解决不了，让用户去点：
+**工具不在**（没有 `dispatch` / `health`）= 连接器没连。先别急着让用户操作，**自己试着修一次**：
+
+```bash
+for d in "$HOME"/.workbuddy/plugins/marketplaces/*/plugins/gcwork; do
+  [ -f "$d/install.mjs" ] && node "$d/install.mjs" && break
+done
+```
+
+这条命令自己找插件位置，不用你猜。脚本会把 MCP 配置里的路径换成这台机器的真实路径——`Connection closed` 九成是路径没展开。
+
+修完再让用户点一下重连：
+
+> 我已经把配置修好了。请在「连接器 → 自定义连接器」里对 `gcwork-engine` 点「重连」，然后告诉我。
+
+脚本不存在或跑失败，才让用户手动处理：
 
 > 「连接器 → 自定义连接器」找到 `gcwork-engine` 打开开关；报错或红点点「重连」，好了告诉我。
 
