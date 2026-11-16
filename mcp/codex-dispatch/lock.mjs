@@ -8,7 +8,7 @@
 //
 // 实现只有一件事：openSync(path, 'wx')。O_EXCL 建文件是原子的，
 // 存在即失败，不存在就成功，不需要 flock、不需要 pid 轮询、不需要等锁队列。
-import { openSync, closeSync, writeSync, readFileSync, unlinkSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { openSync, closeSync, writeSync, readFileSync, unlinkSync, mkdirSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
@@ -49,18 +49,40 @@ function pidAlive(pid) {
   }
 }
 
+/**
+ * 读锁内容。
+ *
+ * 必须区分三件事，混在一起会出竞态（实测抓到过）：
+ *   读到了      → 返回记录
+ *   文件不存在  → null，可以抢
+ *   文件在但读不出 → 有人正在 open 和 write 之间，**绝不能当僵尸删掉**
+ *
+ * 第三种如果不单独处理，就会出现「A 刚建好空文件、B 判定损坏后删掉并抢锁」，
+ * 同一目录同时跑起两个任务。
+ *
+ * 真残留的空文件（进程在 open 与 write 之间崩了）也要能回收，
+ * 所以用 mtime 兜底：超过 WRITING_GRACE 还读不出，就认定不是正在写。
+ */
+const WRITING_GRACE_MS = 5000;
+
 function readLock(path) {
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
-  } catch {
-    // 文件在但读不出来：可能是刚建还没写完，也可能是残留的空文件。
-    // 当成「别人刚拿到」既不安全也不准确，交给调用方按 pid 判活处理。
-    return null;
+  } catch (e) {
+    if (e.code === 'ENOENT') return null;
+    // 读不出内容：短时间内的当「正在写入」，超时才认定是残留
+    try {
+      const age = Date.now() - statSync(path).mtimeMs;
+      return age < WRITING_GRACE_MS ? { __writing: true } : null;
+    } catch {
+      return null; // 连 stat 都不行，说明文件没了
+    }
   }
 }
 
 function isStale(info) {
   if (!info) return true;
+  if (info.__writing) return false; // 正在写，当活锁
   if (!pidAlive(info.pid)) return true;
   const age = Date.now() - Date.parse(info.acquiredAt || 0);
   return Number.isFinite(age) && age > MAX_HOLD_MS;

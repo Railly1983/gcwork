@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readdirSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -114,17 +114,36 @@ test('持有进程已死：锁当僵尸清掉，下一个能抢到', () => {
   release(home, ws, got.token);
 });
 
-test('锁文件内容损坏：不能当成有效锁，也不能崩', () => {
+test('锁文件刚建还没写完：当「正在写入」，不许抢', () => {
   clearLocks();
-  const home = freshHome('corrupt');
-  const ws = join(ROOT, 'ws-corrupt');
+  const home = freshHome('writing');
+  const ws = join(ROOT, 'ws-writing');
   mkdirSync(LOCKS, { recursive: true });
   const name = `dir-${createHash('sha1').update(ws.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 16)}.lock`;
-  writeFileSync(join(LOCKS, name), 'not json at all', 'utf8');
+  // 模拟「A 已 open 建好文件、还没 write」的那一瞬
+  writeFileSync(join(LOCKS, name), '', 'utf8');
 
   const got = acquire(home, ws, { taskRef: 't-new00000' });
-  assert.equal(got.ok, true);
+  assert.equal(got.ok, false, '空文件必须当活锁：否则同一目录会跑起两个任务');
+  clearLocks();
+});
+
+test('锁文件是残留空文件：超过宽限期后可以回收', () => {
+  clearLocks();
+  const home = freshHome('residue');
+  const ws = join(ROOT, 'ws-residue');
+  mkdirSync(LOCKS, { recursive: true });
+  const name = `dir-${createHash('sha1').update(ws.replace(/\\/g, '/').toLowerCase()).digest('hex').slice(0, 16)}.lock`;
+  const p = join(LOCKS, name);
+  writeFileSync(p, '', 'utf8');
+  // 把 mtime 改到很久以前，模拟「进程在 open 与 write 之间崩了」
+  const old = new Date(Date.now() - 3600_000);
+  utimesSync(p, old, old);
+
+  const got = acquire(home, ws, { taskRef: 't-new00000' });
+  assert.equal(got.ok, true, '残留空文件不能把目录永久锁死');
   release(home, ws, got.token);
+  clearLocks();
 });
 
 test('跨进程竞争：六个进程同时抢，只有一个成功', async () => {
