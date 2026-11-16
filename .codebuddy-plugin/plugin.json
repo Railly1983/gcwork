@@ -1,71 +1,19 @@
 {
   "name": "gcwork",
-  "version": "2.2.0",
-  "description": "Plugs local Codex and Claude Code into WorkBuddy through a thin expert plus an MCP engine. Natural-language dispatch with explicit model and effort, automatic artifact verification and resume. Authorize the gcwork-engine connector on first use.",
+  "version": "3.0.0",
+  "description": "Dispatch tasks to your local Codex through its app-server. One connector, two tools, synchronous results with resumable sessions.",
   "author": {
     "name": "Jike",
     "email": "30673448@qq.com"
   },
-  "agents": [
-    "./agents/gcwork.md"
-  ],
-  "expertType": "agent",
-  "agentName": "gcwork",
-  "displayName": {
-    "en": "Jike",
-    "zh": "吉克搬砖"
-  },
-  "profession": {
-    "en": "Codex/Claude Collaboration Specialist",
-    "zh": "Codex/Claude协作专家"
-  },
-  "displayDescription": {
-    "en": "Plug local Codex and Claude into WorkBuddy: dispatch in natural language, pick model and effort, with verification and resume handled for you. Authorize the gcwork-engine connector on first use.",
-    "zh": "把本机 Codex 与 Claude 接进 WorkBuddy，自然语言派单，可指定模型与强度，引擎负责验收与续跑；首次使用需在连接器里授权 gcwork-engine。"
-  },
-  "avatar": "avatars/expert.png",
   "categoryId": "02-Engineering",
   "license": "MIT",
   "keywords": [
     "codex",
-    "claude-code",
     "local-cli",
-    "model-routing",
     "coding-agent",
-    "mcp"
+    "mcp",
+    "app-server"
   ],
-  "homepage": "https://github.com/Railly1983/gcwork",
-  "defaultInitPrompt": {
-    "zh": "先帮我看看现在能不能用：Codex 和 Claude 都装好、登上了吗？各自有哪些模型和思考强度可选，你那套预设规则是怎么配的？",
-    "en": "First, check whether things actually work: are Codex and Claude installed and logged in? What models and reasoning levels does each have, and how are the preset rules set up?"
-  },
-  "plugin": "gcwork",
-  "tags": [
-    {
-      "en": "Codex",
-      "zh": "Codex"
-    },
-    {
-      "en": "Claude Code",
-      "zh": "Claude Code"
-    },
-    {
-      "en": "Model routing",
-      "zh": "模型调度"
-    }
-  ],
-  "quickPrompts": [
-    {
-      "zh": "先帮我看看现在能不能用：Codex 和 Claude 都装好、登上了吗？各自有哪些模型和思考强度可选，你那套预设规则是怎么配的？",
-      "en": "First, check whether things actually work: are Codex and Claude installed and logged in? What models and reasoning levels does each have, and how are the preset rules set up?"
-    },
-    {
-      "zh": "用 sol、思考强度 high，把项目里那几个还没处理的 TODO 清掉，改完跑一遍测试再告诉我。",
-      "en": "Use sol at high reasoning effort: clear the remaining TODOs in the project, run the tests, and tell me how it went."
-    },
-    {
-      "zh": "我打算把构建从 webpack 换到 vite，你先评估方案、再拆任务清单。这两件事分头派给合适的人做，最后给我一份能直接开工的迁移计划。",
-      "en": "I'm thinking about moving the build from webpack to vite. Evaluate the options first, then break it into a task list. Hand the two pieces to whoever fits best, and give me a migration plan I can start on right away."
-    }
-  ]
+  "homepage": "https://github.com/Railly1983/gcwork"
 }

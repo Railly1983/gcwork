@@ -1,135 +1,112 @@
-# 吉克搬砖（花名吉克）
+# gcwork
 
-Codex/Claude协作专家。不写业务代码——判断任务难度、写简报、派单、验收、汇报。
+把任务派给本机已登录的 Codex，同步等结果。
 
-## 架构（2.2.0：两层）
+一个连接器，两个工具。没有专家层，没有技能，没有独立的任务调度系统。
 
-- **薄专家层** `agents/gcwork.md`：只有人设、前置条件、怎么用工具、汇报格式。不含契约、路由、CLI 适配逻辑。
-- **MCP 引擎** `mcp/gcwork-engine/`：零依赖 Node stdio MCP server，统一派发、路由、产物解析、验收、续跑。所有判断逻辑都在这里。
-- **执行通道**：Codex 走常驻 `app-server`（`thread/start` → `turn/start`，受理毫秒级、进度实时）；Claude 走 `claude -p` 一次性子进程。
+## 它解决什么
 
-两层之间靠 **MCP 工具的 input/output schema 即契约**，模型调前可读，不需要把契约写进文档。
+Codex CLI 一次任务常要跑几分钟到二十分钟。直接在终端或普通工具调用里跑，会被各种单次调用时限打断，中断后上下文全丢。
 
-## 能力介绍
-
-把本机安装好的 Codex 和 Claude Code 接入 WorkBuddy。自然语言对话即可调用，引擎统一路由到合适的 CLI、验收产物、失败后续跑。
-
-- 支持 Astra / Sol / Terra / Luna / Fable / Opus / Sonnet / Haiku 8 个模型，low / medium / high / xhigh / max 五档思考强度。
-- 三个角色画像：`planner`（只读规划）/ `implementer`（执行）/ `reviewer`（审查）。沙箱默认放开可写，只有 `planner` 或显式传 `sandbox:"read-only"` 才只读。
-
-## 怎么用
-
-直接自然语言说需求即可，专家会调引擎工具：
-
-- **派单**：`dispatch`（必填 `task_id` / `prompt` / `workdir`；可带 `executor` / `role` / `sandbox` / `timeout_sec`）。
-- **查状态**：`status`（按 `job_id` 或 `task_id` 查，进程结束自动收尾）。
-- **续跑**：`resume`（同 `task_id` 半自动续跑，引擎接过上一轮改动与剩余指令开新 job）。
-- **验收**：`verify`（只看 git 改动范围、敏感文件、测试结果，不采信 CLI 自报完成）。
-- **自检**：`health`（两侧是否安装并登录、各角色模型解析、计费风险）。
-
-派单跑在**宿主常驻的 MCP 进程**里，不受宿主轮次上限和 Bash 调用超时影响——不用自己掐表，也不用为它拆单。
-
-## 前提
-
-本机已安装并登录：
-
-- **Codex CLI**（`codex`），用于 astra / sol / terra / luna
-- **Claude Code**（`claude`），用于 fable / opus / sonnet / haiku
-
-不确定就先让专家调 `health` 自查。装好后也可在引擎目录直接跑：
-
-```bash
-cd mcp/gcwork-engine
-node server.mjs        # 作为 MCP server 启动（stdio）
-```
+这个连接器跑在宿主常驻的 MCP 进程里，把 Codex 自己的会话机制用起来：任务在 Codex 那边有独立的 thread，中途断了可以接着那个 thread 继续，不用从头再来。
 
 ## 安装
 
-从 [Releases](https://github.com/Railly1983/gcwork/releases) 下载 `gcwork-2.2.0.zip`，解压放到本地市场：
+前置：本机装好 Codex 并登录。
 
 ```
-~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork/
+npm i -g @openai/codex
+codex login
 ```
 
-放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。
+然后在连接器里启用 `gcwork`。启用后能调到 `dispatch` 就说明通了。
 
-## 连上 MCP（必须做一次）
+## 用法
 
-专家本身只是提示词，真正干活的是 `gcwork-engine` 这个 MCP 服务。**没连上它，专家就没有任何工具可用**，只会变成一份说明书。
+模型会自动调用，你也可以直接说：
 
-连接步骤：
+> 用 Codex 把 src 里那几个 TODO 清掉，改完跑一遍测试。
 
-1. 打开「连接器 → 自定义连接器」，找到 `gcwork-engine`
-2. 右侧开关打开；若显示 `Connection closed` 或红点，点「重连」
-3. 状态变成已连接、工具数正常后，回到对话召唤专家
+### dispatch
 
-排查要点：
+```
+prompt   任务描述全文，要自足 —— Codex 看不到你的对话
+cwd      工作目录绝对路径
+task_ref 任务标识，续跑时复用，不传自动生成
+model    模型名，不传用 Codex 默认
+effort   推理强度，不传用模型默认
+read_only 只读模式，默认 false
+timeout_sec 软超时，默认 600 秒
+```
 
-- 状态一直连不上，点卡片上的「复制日志」看具体报错
-- 包内 `.mcp.json` 用的是官方写法（`command: "node"` + `args: ["./mcp/gcwork-engine/server.mjs"]`），宿主会自己把 `node` 换成本机内置的 Node、把 `./` 解析成插件根的绝对路径。**不要改成绝对路径，也不要在 `command` 里写变量**——宿主只解析 `args` 里的 `./`，`command` 不做任何替换
-- 报 `Connection closed` 且 connectMs 只有几毫秒：进程根本没起来，先确认解压后 `mcp/gcwork-engine/server.mjs` 在包里
-- 本机直接验证服务能起：
+返回：
 
-  ```bash
-  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
-    | node mcp/gcwork-engine/server.mjs
-  ```
+```
+status        completed / pending / failed / interrupted
+summary       回答开头一段，够判断有没有跑偏
+changes       files / paths / untracked / deleted / preexisting
+line_stats    additions / deletions（非 git 目录只统计新增文件，并注明）
+artifacts     diff、全文、日志的路径
+diagnosis     失败时才有，写明阶段、错误、失败前改了哪些文件
+```
 
-## 成本
+### continue
 
-每次启动外部 CLI 都有初始化上下文开销，实际消耗以 CLI 返回的 `usage` 为准。
+```
+task_ref   dispatch 返回的那个
+prompt     续做时的补充要求，可选
+```
 
-省钱的三个杠杆，按效果排序：
+四种情况自动分辨，你不需要判断：
 
-1. **降强度** —— `high` 改 `medium` 或 `low`
-2. **换便宜模型** —— 杂活用 `chore` 档，别拿 astra 改错别字
-3. **少派单** —— 能一次干完的，别拆两次；失败用 `resume` 续跑，不要整单重发
+| 情况 | 行为 |
+| --- | --- |
+| 任务还在跑 | 接着等，不新起一轮 |
+| 任务其实已完成 | 直接取回结果，不重复执行 |
+| 任务中断或失败 | 在同一 Codex 会话里接着做 |
+| 宿主重启过 | 从磁盘记录恢复原会话 |
+
+## 几个设计取舍
+
+**同步而不是轮询。** 轮询要保存状态机、判活、回收孤儿任务，代码多一倍，出错面也大。而且每次查询都是一轮完整对话，历史越长越贵。同步一次调用拿到结果，只在超软时限时转成 `pending`，让调用方接着问。
+
+**改动以 git 为准。** Codex 说「改好了」不算数。任务开始记 `HEAD` 和文件指纹，结束时对比，报出真实改动。工作区原本就有的未提交修改不会被算成这次任务的产出。
+
+**结果分层。** 成功只给开头八百字和改动清单，全文留在磁盘上按需读。失败相反，给足诊断 —— 那时候省 token 没有意义。
+
+**软超时短于宿主硬超时。** 宿主给 MCP 工具的超时默认一小时，软超时到点主动返回 `pending`，不会被硬杀导致连 `task_ref` 都拿不到。
+
+## 已知边界
+
+**会话恢复不等于进程恢复。** Codex 的 `thread/resume` 能恢复会话历史和上下文，但不能复活一个已经被杀掉的执行进程。所以中断后是「在原会话基础上再发一轮接着做」，不是「原地继续跑」。这决定了续做时必须告诉 Codex 已经改了哪些文件，否则它会从头再做一遍 —— 代码里这一层是 `buildHandoff`。
+
+**`turn/diff/updated` 不可靠。** 官方协议里有这个事件，但 codex-cli 0.166.0 实测一次都没发过。所以改动证据完全靠 git 自己算，不依赖这个事件。
+
+**同一个 thread 只能有一个 writer。** 旧连接没断开就去 resume 会报 `already has an active writer`。服务内部会先关连接再恢复；如果你同时开了两个 WorkBuddy 窗口对同一目录派单，第二个会明确报这个错。
+
+**非 git 目录能力受限。** 没有 git 就没有行数统计，也没有回滚保障，只能按文件修改时间和大小判断有没有被改过。返回里会明确写出来。
+
+**app-server 是官方标注给开发调试用的。** 接口可能变。所有 JSON-RPC 通信都收在 `appserver.mjs` 一个文件里，协议变了只改那一处。
 
 ## 结构
 
 ```
-.codebuddy-plugin/plugin.json      专家清单（agent 型）；MCP 由包根 .mcp.json 自动加载
-agents/gcwork.md                   薄专家：人设、前置、工具用法、汇报格式
-mcp/gcwork-engine/
-  server.mjs                       MCP stdio server（零依赖）
-  src/
-    models.mjs                     路由/选目标/模型解析/CLI 入口探测/参数存在性探测/健康自检
-    dispatch.mjs                   派发编排：dispatch/status/resume/契约输出/写锁/并发
-    verify.mjs                     独立验收（git 范围 + 敏感文件 + 测试）
-    schema.mjs                     MCP 工具声明（即契约）
-    adapters/codex.mjs              Codex CLI 适配（结果解析；执行走 app-server）
-    adapters/claude.mjs             Claude CLI 适配
-    engine/git.mjs                  git 快照与变更计算
-    engine/ledger.mjs               任务台账持久化
-    engine/run.mjs                  进程存活探测与超时标记
-    engine/worker.mjs               单任务执行器（进度累积、收尾判定）
-    engine/appserver.mjs            codex app-server 客户端（连接、通知流）
-    engine/locks.mjs                同目录写锁
-    engine/errors.mjs               错误分类 + quota 恢复时间解析
-tests/engine.test.mjs              51 项单元测试（node --test，不烧额度）
-avatars/expert.png                 专家头像
-LICENSE / CHANGELOG.md
+mcp/gcwork/
+  server.mjs       MCP 协议层，两个工具的定义
+  dispatch.mjs     派单编排、续跑判断、结果整理
+  appserver.mjs    codex app-server 的 JSON-RPC 连接
+  entry.mjs        找 codex 入口
+  git.mjs          基线快照与改动识别
 ```
 
-派发产物落在 `~/.workbuddy/gcwork/runs/<jobId>/`，台账在 `~/.workbuddy/gcwork/ledger/`，保留 14 天。可用 `GCWORK_HOME` 覆盖根目录（测试隔离用）。
+任务记录在 `~/.gcwork/tasks/`，产物在 `~/.gcwork/runs/`。可用 `GCWORK_HOME` 改位置。
 
-跑测试：
+## 测试
 
-```bash
-cd mcp/gcwork-engine && node --test tests/engine.test.mjs
+```
+node --test tests/*.test.mjs
 ```
 
-## 已知限制
+21 项，覆盖基线记录、改动识别（含未跟踪与删除文件、任务前脏文件排除）、软超时转 pending、幂等、失败诊断、中断处理。
 
-- **宿主轮次上限已绕过**。任务跑在常驻 MCP 进程里，宿主结束轮次不影响它；`status` / `resume` 会主动回收并收尾。
-- **不做长会话续接**。每单都是新会话（Codex `--ephemeral`、Claude `--no-session-persistence`）；续跑靠 `resume` 把上一轮改动清单 + 剩余指令接上。
-- **改动检测靠 git**。工作目录不是 git 仓库时 `changedFiles` 为 `null`，且会在 `gitWarning` 里提示没有回滚保障。
-- **模型名按家族动态解析**。家族不存在报 `MODEL_UNAVAILABLE`，不挑别的模型顶上；读不到 `models_cache` 才用写死名字并给 `warning`。
-- **两个 CLI 是独立额度池**。Codex 四个模型共用一份账号额度，Claude 侧独立；`quota_exhausted` 时结果带 `resumeAfter`。
-- **继承宿主环境变量**。若 `ANTHROPIC_API_KEY` 等被设置，CLI 可能走 API 计费而非订阅额度，此时 `billingWarning` 提示；想强制走 CLI 自身登录，派单传 `env:"clean"`。
-- **并发**：不设全局上限，交给宿主与系统调度；同一目录同时仅一个可写任务（写锁）。
-- **CLI 参数存在性探测**：引擎启动时会解析 `CLI --help`，缺哪个参数就省哪个，抗 CLI 版本变更。
-
-## 许可与变更
-
-MIT，见 `LICENSE`。版本变更见 `CHANGELOG.md`。
+`tests/fixtures/fake-codex.mjs` 是一个可编程的假 app-server，用来注入各种故障，不需要真跑 Codex。
