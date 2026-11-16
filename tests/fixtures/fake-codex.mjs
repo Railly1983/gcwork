@@ -74,6 +74,49 @@ function handle(msg) {
     return;
   }
 
+  // 模型清单：派单前的核对与 status 工具都要它。故意只开两个模型、档位不同，
+  // 这样「档位不支持」这条路径才能被真实测到。
+  if (method === 'model/list') {
+    send({
+      jsonrpc: '2.0', id,
+      result: {
+        data: [
+          {
+            id: 'fake-sol', model: 'fake-sol', displayName: 'Fake Sol', hidden: false, isDefault: true,
+            defaultReasoningEffort: 'medium',
+            supportedReasoningEfforts: [
+              { reasoningEffort: 'low', description: '快' },
+              { reasoningEffort: 'medium', description: '平衡' },
+              { reasoningEffort: 'high', description: '深' },
+            ],
+          },
+          {
+            id: 'fake-lite', model: 'fake-lite', displayName: 'Fake Lite', hidden: false, isDefault: false,
+            defaultReasoningEffort: 'low',
+            supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '快' }],
+          },
+        ],
+      },
+    });
+    return;
+  }
+
+  if (method === 'account/read') {
+    send({
+      jsonrpc: '2.0', id,
+      result: {
+        account: { type: 'chatgpt', email: 'fake@example.com', planType: 'plus' },
+        requiresOpenaiAuth: true,
+      },
+    });
+    return;
+  }
+
+  if (method === 'modelProvider/capabilities/read') {
+    send({ jsonrpc: '2.0', id, result: { webSearch: true, imageGeneration: false } });
+    return;
+  }
+
   if (method === 'thread/resume') {
     const tid = params?.threadId;
     const t = threads.get(tid) || { turns: [] };

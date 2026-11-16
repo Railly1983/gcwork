@@ -1,17 +1,17 @@
 # codex-dispatch / Codex 派单 交接文档
 
 > 读这份文档加读代码，可以接手这个项目，不需要对话历史。
-> 最后更新：3.0.0
+> 最后更新：3.1.0
 
 ## 一句话是什么
 
-把任务交给本机 Codex 的 WorkBuddy 连接器。纯 MCP，一个工具派单、一个工具续跑。
+在 WorkBuddy 中调用本机 Codex 执行任务的连接器。纯 MCP，三个工具：派单、续跑、查状态。
 
 ## 当前状态
 
 | 项 | 值 |
 | --- | --- |
-| 版本 | 3.0.0 |
+| 版本 | 3.1.0 |
 | 单测 | 36/36（`node --test tests/*.test.mjs`） |
 | 真机验证 | 派单、软超时转 pending、跨进程续做、已完成结果取回、跨进程抢锁，五项均过 |
 | 发布 | 未发布。2.2.0 仍在平台审核中，是否覆盖待定 |
@@ -32,7 +32,7 @@
 
 ```
 mcp/codex-dispatch/
-  server.mjs      MCP 协议层。两个工具的定义全在这里，包括给模型的引导。
+  server.mjs      MCP 协议层。三个工具的定义全在这里，包括给模型的引导。
   dispatch.mjs    派单编排、续跑判断、回执整理、产物落盘。
   lock.mjs        目录写锁。
   appserver.mjs   codex app-server 的 JSON-RPC 连接。协议改动只需改这里。

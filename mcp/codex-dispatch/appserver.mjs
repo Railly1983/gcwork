@@ -8,7 +8,9 @@
 //   （-32600 already has an active writer）。所以续跑前必须确保旧连接已断开。
 import { spawn } from 'node:child_process';
 
-const READY_TIMEOUT_MS = 30_000;
+// 握手超时给足：首次启动 codex 会做版本检查与账号读取，机器忙时实测能到 20 秒以上。
+// 曾用 30 秒，在日常并发下偶发过一次超时，松到 60 秒。
+const READY_TIMEOUT_MS = 60_000;
 const REQ_TIMEOUT_MS = 60_000;
 
 export class AppServer {
@@ -29,7 +31,7 @@ export class AppServer {
     if (this.child && !this.dead) return;
     this.spawnChild();
     await this.request('initialize', {
-      clientInfo: { name: 'codex-dispatch', version: '3.0.0' },
+      clientInfo: { name: 'codex-dispatch', version: '3.1.0' },
       capabilities: {},
     }, READY_TIMEOUT_MS);
     this.notify('initialized', {});

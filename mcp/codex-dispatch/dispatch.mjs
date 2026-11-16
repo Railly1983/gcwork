@@ -35,6 +35,49 @@ const ZOMBIE_WAIT_MS = Number(process.env.CODEX_DISPATCH_ZOMBIE_MS) > 0
   ? Number(process.env.CODEX_DISPATCH_ZOMBIE_MS)
   : 60_000;
 
+/**
+ * 派单前核对模型与强度。
+ *
+ * 为什么必须在派单前查：传了不存在的模型名，thread/start 照样成功，
+ * 到 turn 执行阶段才报 `The 'sol' model is not supported when using Codex with
+ * a ChatGPT account`。等十几秒才发现、还占了一次会话，体验很差。
+ * 校验失败不阻断派单 —— 探测本身出错时不能连累正常任务。
+ */
+async function checkModelEffort(conn, model, effort) {
+  if (!model && !effort) return null;
+  let list;
+  try {
+    list = await conn.request('model/list', {}, 20_000);
+  } catch {
+    return null; // 查不到就放行，交给 Codex 自己判断
+  }
+  const rows = (list?.data || []).filter((m) => !m.hidden);
+  if (!rows.length) return null;
+
+  const ids = rows.map((m) => m.id);
+  const hit = model ? rows.find((m) => m.id === model) : rows.find((m) => m.isDefault) || rows[0];
+
+  if (model && !hit) {
+    return {
+      status: 'rejected',
+      error: `没有这个模型：${model}`,
+      hint: `可用的模型名只有这些：${ids.join('、')}。短名（如 sol）在 ChatGPT 账号下不被接受，要用完整 id。`,
+      models: ids,
+    };
+  }
+  if (effort) {
+    const ok = (hit?.supportedReasoningEfforts || []).map((e) => e.reasoningEffort);
+    if (ok.length && !ok.includes(effort)) {
+      return {
+        status: 'rejected',
+        error: `模型 ${hit.id} 不支持强度 ${effort}`,
+        hint: `这个模型支持：${ok.join(' / ')}。不传则用默认档 ${hit.defaultReasoningEffort || '未知'}。`,
+      };
+    }
+  }
+  return null;
+}
+
 function softLimitMs(requestedSec) {
   const want = Number(requestedSec) > 0 ? Number(requestedSec) * 1000 : DEFAULT_SOFT_MS;
   return Math.max(MIN_SOFT_MS, Math.min(want, HOST_HARD_MS - SAFETY_MS));
@@ -65,9 +108,16 @@ function newRef() {
   return `t-${randomUUID().slice(0, 8)}`;
 }
 
+/**
+ * 沙箱策略。
+ *
+ * 只读模式显式给 networkAccess: true。只读是「不许改文件」，不是「不许联网」——
+ * 之前 2.x 的计划模式被当成离线，联网搜索和查文档全废，那是错的。
+ * 只读任务查报错、看官方文档、核对外部接口，都得联网。
+ */
 function sandboxPolicy(readOnly) {
   return readOnly
-    ? { type: 'readOnly' }
+    ? { type: 'readOnly', networkAccess: true }
     : { type: 'workspaceWrite', writableRoots: [], networkAccess: true };
 }
 
@@ -153,6 +203,10 @@ function receipt(rec, turnResult, changes) {
     task_ref: rec.taskRef,
     thread_id: rec.threadId,
     turn_id: turnResult.turnId || rec.lastTurnId || null,
+    // 用了哪个模型、哪个强度，回执里写清 —— 用户指定了参数就该看得到是否生效
+    model: rec.resolvedModel || rec.model || null,
+    effort: rec.effort || null,
+    read_only: Boolean(rec.readOnly),
     // 成功只给开头：够判断有没有跑偏。全文在 artifacts 里，需要时再读。
     summary: ok
       ? String(turnResult.message || '').slice(0, 800)
@@ -197,7 +251,9 @@ function receipt(rec, turnResult, changes) {
       files_changed_before_failure: [...files, ...untracked].slice(0, 40),
       hint: turnResult.status === 'running'
         ? '任务还在跑。用 continue 带同一 task_ref 接着等，不会重复执行。'
-        : '失败前已改的文件保留在工作区。用 continue 可在同一会话上下文里续做。',
+        : /model is not supported|model.*not supported/i.test(String(turnResult.error || ''))
+          ? '模型名不被这个账号接受。调 status 查可用模型，用完整 id（短名如 sol 不行）重新派单。'
+          : '失败前已改的文件保留在工作区。用 continue 可在同一会话上下文里续做。',
     };
   }
   if (changes?.warning) r.git_warning = changes.warning;
@@ -292,6 +348,16 @@ export async function dispatch(args = {}) {
   job.promise = (async () => {
     try {
       await conn.start();
+      // 先核对模型与强度：传错名字时 thread/start 也会成功，拖到执行阶段才报错
+      const bad = await checkModelEffort(conn, args.model, args.effort);
+      if (bad) {
+        rec.status = 'rejected';
+        rec.error = bad.error;
+        saveTask(rec);
+        // 没起 thread，这个连接留着没用，关掉免得留一个常驻进程
+        await conn.close();
+        return { ...bad, task_ref: taskRef };
+      }
       // thread/start 的预算是独立的：必须在转 pending 之前拿到 threadId。
       const th = await conn.request('thread/start', {
         cwd,
@@ -335,6 +401,9 @@ export async function dispatch(args = {}) {
       job.done = true;
       // 锁在这里放，不是工具调用返回时：pending 之后任务还在后台跑，那段必须继续占着。
       if (lockToken) release(homeDir(), cwd, lockToken);
+      // 连接也必须关。每单起一个 app-server 子进程，不关就每单留一个 codex 进程，
+      // 派十单攒十个（实测进程数只涨不降）。会话历史已落盘，续跑时重新 resume 即可。
+      try { await conn.close(); } catch { /* 关不掉不影响结果，进程随宿主退出 */ }
     }
   })();
 
@@ -355,18 +424,17 @@ async function joinExisting(job, args) {
   // 建 thread 是确定的一次性开销（实测 1-3 秒），不该占用「等任务」的预算。
   // 先等 ready：此时 threadId 已落盘，返回 pending 才能续得上。
   // 建 thread 本身失败会走 job.promise 的 catch，这里不会空等。
-  const READY_LIMIT = 60_000;
-  const r0 = await Promise.race([
-    (async () => { while (!job.ready && !job.done) await new Promise((r) => setTimeout(r, 100)); return 'ready'; })(),
-    new Promise((res) => setTimeout(() => res('timeout'), READY_LIMIT)),
-  ]);
+  // 上限要盖住「握手 + 建 thread」两段，握手本身已放宽到 60 秒。
+  const READY_LIMIT = 90_000;
+  const r0 = await raceSignal(
+    (async () => { while (!job.ready && !job.done) await sleep(100); return 'ready'; })(),
+    READY_LIMIT,
+    'timeout',
+  );
   // done 之后 promise 一定已 settle，await 立即返回真实结果
   if (job.done) return job.promise;
 
-  const waited = await Promise.race([
-    job.promise,
-    new Promise((res) => setTimeout(() => res(PENDING), softLimitMs(args.timeout_sec))),
-  ]);
+  const waited = await raceSignal(job.promise, softLimitMs(args.timeout_sec), PENDING);
 
   if (waited !== PENDING) return waited;
 
@@ -397,6 +465,37 @@ async function joinExisting(job, args) {
 }
 
 const PENDING = Symbol('pending');
+
+function sleep(ms) {
+  return new Promise((r) => {
+    const t = setTimeout(r, ms);
+    // 只是等待信号，不该拖住进程退出
+    if (typeof t.unref === 'function') t.unref();
+  });
+}
+
+/**
+ * 带超时的等待。
+ *
+ * 必须清掉定时器：`Promise.race` 里输掉的那个定时器如果一直挂着，
+ * 进程就退不出去 —— 每次返回 pending 都留一个，MCP 进程和测试都退不掉（实测卡死）。
+ */
+function raceSignal(promise, ms, timeoutValue) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(timeoutValue);
+    }, ms);
+    // 定时器不该单独维持进程存活
+    if (typeof timer.unref === 'function') timer.unref();
+    Promise.resolve(promise).then(
+      (v) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } },
+      (e) => { if (!settled) { settled = true; clearTimeout(timer); reject(e); } },
+    );
+  });
+}
 
 /**
  * 续跑。四种情况分别处理（对应方案里的幂等判断）：
@@ -525,6 +624,7 @@ export async function continueTask(args = {}) {
     } finally {
       job.done = true;
       if (lockToken) release(homeDir(), rec.cwd, lockToken);
+      try { await conn.close(); } catch { /* 关不掉不影响结果 */ }
     }
   })();
 

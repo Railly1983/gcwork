@@ -12,8 +12,8 @@
           "en": "Codex Dispatch"
         },
         "description": {
-          "zh": "把任务交给本机 Codex 执行，同步等结果。改了哪些文件以 git 实测为准，中途断了可以接着做。",
-          "en": "Hand tasks to your local Codex and wait for the result. File changes are verified by git; interrupted tasks pick up where they left off."
+          "zh": "在 WorkBuddy 中调用本机 Codex 执行任务，可以指定模型和思考强度，任务中途意外中断可接续。",
+          "en": "Run tasks with your local Codex from WorkBuddy. Pick the model and reasoning effort; interrupted tasks can be resumed."
         },
         "icon": "./assets/icon.svg"
       }

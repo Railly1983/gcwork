@@ -253,3 +253,36 @@ test('缺少必填参数时明确拒绝，不抛裸异常', async () => {
   assert.equal(r3.status, 'rejected');
   await d.shutdown();
 });
+test('模型校验：不存在的模型名当场拒绝，并列出可用值', async () => {
+  const { ws, state } = fresh();
+  const d = await load('complete', state);
+  // 真实踩过：短名 sol 在 ChatGPT 账号下 thread/start 能过，执行阶段才报错
+  const r = await d.dispatch({ prompt: 'x', cwd: ws, model: 'sol', timeout_sec: 30 });
+  assert.equal(r.status, 'rejected');
+  assert.match(r.error, /sol/);
+  assert.ok(Array.isArray(r.models) && r.models.includes('fake-sol'), '要把可用模型列出来');
+  assert.match(r.hint, /完整 id/);
+  await d.shutdown();
+});
+
+test('模型校验：强度档位不支持时拒绝，并说明该模型支持什么', async () => {
+  const { ws, state } = fresh();
+  const d = await load('complete', state);
+  const r = await d.dispatch({ prompt: 'x', cwd: ws, model: 'fake-lite', effort: 'high', timeout_sec: 30 });
+  assert.equal(r.status, 'rejected');
+  assert.match(r.error, /fake-lite/);
+  assert.match(r.error, /high/);
+  assert.match(r.hint, /low/);
+  await d.shutdown();
+});
+
+test('模型校验：合法模型与强度正常放行，回执带上实际参数', async () => {
+  const { ws, state } = fresh();
+  const d = await load('complete', state);
+  const r = await d.dispatch({ prompt: 'x', cwd: ws, model: 'fake-sol', effort: 'high', timeout_sec: 30 });
+  assert.equal(r.status, 'completed');
+  assert.equal(r.model, 'fake-model', '回执要带 resolvedModel');
+  assert.equal(r.effort, 'high');
+  assert.equal(r.read_only, false);
+  await d.shutdown();
+});

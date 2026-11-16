@@ -3,8 +3,9 @@
 // 为什么必须常驻：任务跑在这个进程里，不受宿主单次工具调用与 Bash 超时限制。
 // 宿主默认给 MCP 工具 1 小时（MCP_TOOL_TIMEOUT），足够跑完绝大多数任务。
 import { dispatch, continueTask, sweep, shutdown } from './dispatch.mjs';
+import { status } from './status.mjs';
 
-const VERSION = '3.0.0';
+const VERSION = '3.1.0';
 const PROTOCOL = '2024-11-05';
 
 const TOOLS = [
@@ -21,6 +22,13 @@ const TOOLS = [
       'status=pending 表示任务仍在跑：带同一 task_ref 调 continue 接着等，不会重复执行。',
       'status 非 completed 时返回 diagnosis，里面写明失败阶段与错误，直接转告用户。',
       '',
+      '参数：',
+      '- model：模型名。不传用 Codex 默认。可用模型与别名先调 status 查。',
+      '- effort：思考强度，如 low / medium / high / xhigh / max / ultra。各模型支持的档位不同，',
+      '  先调 status 看 models[].efforts；不传用模型默认档。强度越高越慢越贵，日常任务不必拉满。',
+      '- read_only：只读模式。不改文件、不占目录锁，但仍可联网搜索与查文档。',
+      '  适合只分析、只审查、只出结论的任务。默认 false。',
+      '',
       '要点：',
       '- 一单能干完的别拆成多单，每单都有启动开销。',
       '- 任务描述要自足：把背景、路径、验收标准都写进 prompt，Codex 看不到当前对话。',
@@ -34,9 +42,12 @@ const TOOLS = [
         prompt: { type: 'string', description: '任务描述全文。要自足，含背景与验收标准。' },
         cwd: { type: 'string', description: '工作目录绝对路径。' },
         task_ref: { type: 'string', description: '任务标识，续跑时复用。不传则自动生成。' },
-        model: { type: 'string', description: '模型名，不传用 Codex 默认。' },
-        effort: { type: 'string', description: '推理强度，如 low / medium / high。不传用模型默认。' },
-        read_only: { type: 'boolean', description: '只读模式。默认 false。' },
+        model: { type: 'string', description: '模型名，如 gpt-6.1-sol。可用值先调 status 查。不传用 Codex 默认。' },
+        effort: {
+          type: 'string',
+          description: '思考强度：low / medium / high / xhigh / max / ultra。各模型支持的档位不同，先调 status 查。不传用模型默认。',
+        },
+        read_only: { type: 'boolean', description: '只读模式：不改文件，仍可联网。默认 false。' },
         timeout_sec: {
           type: 'integer',
           description: '软超时秒数，默认 600。到点返回 pending，任务继续在后台跑。',
@@ -64,6 +75,22 @@ const TOOLS = [
         timeout_sec: { type: 'integer', description: '软超时秒数，默认 600。' },
       },
     },
+  },
+  {
+    name: 'status',
+    description: [
+      '查本机 Codex 能不能用：装没装、登录没登录、什么套餐、有哪些模型、每个模型支持哪些思考强度。',
+      '',
+      '不建会话、不改文件、不占目录锁、不花额度，几秒返回。',
+      '',
+      '派单前要指定模型或强度，却不确定可用值时，先调这个，不要猜。',
+      '模型清单随账号与套餐变化，写死的名字会过期。',
+      '',
+      '返回：status（ready / not_ready / codex_not_found）、codex.version、',
+      'account（登录状态、套餐）、models（id / 名称 / 默认档 / 可用强度档）、',
+      'capabilities（能否联网搜索、能否生图）。',
+    ].join('\n'),
+    inputSchema: { type: 'object', properties: {} },
   },
 ];
 
@@ -100,6 +127,7 @@ async function handle(msg) {
       let out;
       if (name === 'dispatch') out = await dispatch(a);
       else if (name === 'continue') out = await continueTask(a);
+      else if (name === 'status') out = await status();
       else throw new Error(`未知工具：${name}`);
       send({
         jsonrpc: '2.0',
