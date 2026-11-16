@@ -1,7 +1,7 @@
 // 任务台账持久化：task_id → job 记录（含状态/产物路径/已改文件/partialOutput）。落盘 JSON。
 // GCWORK_HOME 可被覆盖，便于测试隔离。
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, renameSync,
+  existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, appendFileSync, renameSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -15,9 +15,42 @@ export function runsDir() { return join(homeDir(), 'runs'); }
 export function locksDir() { return join(homeDir(), 'locks'); }
 
 export function ensureDirs() {
-  for (const d of [ledgerDir(), runsDir(), locksDir()]) {
+  for (const d of [ledgerDir(), runsDir(), locksDir(), sessionsDir()]) {
     if (!existsSync(d)) mkdirSync(d, { recursive: true });
   }
+}
+
+/** 会话工作日志目录：按天一个文件，记录当天派了哪些单。 */
+export function sessionsDir() {
+  return join(homeDir(), 'sessions');
+}
+
+/**
+ * 追加一行工作日志。零成本（引擎内写文件，不经模型），
+ * 目的是让「下个会话」或「同一会话稍后」不必翻历史就能知道做过什么。
+ */
+export function appendSessionNote(line) {
+  ensureDirs();
+  const day = new Date().toISOString().slice(0, 10);
+  const p = join(sessionsDir(), `${day}.md`);
+  try {
+    if (!existsSync(p)) writeFileSync(p, `# ${day} gcwork 工作日志\n\n`, 'utf8');
+    appendFileSync(p, `- ${line}\n`, 'utf8');
+    return p;
+  } catch {
+    return null;
+  }
+}
+
+/** 读当天（或指定日期）的工作日志行；用于会话开场了解上下文。 */
+export function readSessionNotes(day = null) {
+  const d = day || new Date().toISOString().slice(0, 10);
+  const p = join(sessionsDir(), `${d}.md`);
+  if (!existsSync(p)) return { day: d, lines: [], path: p };
+  let text = '';
+  try { text = readFileSync(p, 'utf8'); } catch { return { day: d, lines: [], path: p }; }
+  const lines = text.split('\n').filter((l) => l.startsWith('- ')).map((l) => l.slice(2));
+  return { day: d, lines, path: p };
 }
 
 function ledgerPath(jobId) {

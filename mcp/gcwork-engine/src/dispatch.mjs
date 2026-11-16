@@ -10,6 +10,7 @@ import { gitSnapshot, gitDelta, snapshotToJSON, snapshotFromJSON, gitDiffText } 
 import { putJob, getJob, getJobStatus, getLatestByTask, resolveRef, listJobs, pruneRuns, runsDir, locksDir, ensureDirs } from './engine/ledger.mjs';
 import { pidAlive, killJob, markTimedOut, wasTimedOut } from './engine/run.mjs';
 import { acquireLock, releaseLock } from './engine/locks.mjs';
+import { appendSessionNote, readSessionNotes } from './engine/ledger.mjs';
 import { classifyError, parseResumeAfter } from './engine/errors.mjs';
 import { readResult as codexRead } from './adapters/codex.mjs';
 import { readResult as claudeRead } from './adapters/claude.mjs';
@@ -184,6 +185,13 @@ export async function dispatch(taskInput = {}) {
     lockPath: task._lockPath || null,
   };
   putJob(job);
+
+  // 自动记一行工作日志：零成本（引擎内写文件），让「下个会话」开局就知道做过什么，
+  // 不必靠用户复述或翻历史。这是省积分的一部分，不让用户操心。
+  appendSessionNote(
+    `${nowStamp()} ${jobId} · ${target.cli}/${target.name}/${target.effort} · `
+    + `「${truncate(String(prompt).replace(/\s+/g, ' '), 60)}」→ 已派单`,
+  );
   putJob(job);
 
   // env 必须带进 spec：不带的话执行层拿不到 clean 模式，schema 承诺就成了空话
@@ -368,6 +376,11 @@ export function finalize(job) {
 
   putJob(updated);
 
+  // 收尾也落到会话日志：下个会话看到「失败原因」就知道该不该续跑
+  appendSessionNote(
+    `${job.job_id} · ${status}${summary && summary !== status ? `（${truncate(summary, 60)}）` : ''}`,
+  );
+
   // 只有确认进程已退出才释放锁；还活着就留着，防止同目录并发写。
   if (!stillAlive) {
     releaseLock(job.lockPath, job.job_id); // 带 jobId 校验归属，防误删新任务的锁
@@ -401,6 +414,27 @@ export function listJobsTool(limit = 20) {
   // 先收尾再列：否则已经死掉的任务会一直显示 running，看着像挂了几个小时。
   try { recoverOrphans(); } catch { /* 收尾失败也要能列出 */ }
   return listJobs(limit);
+}
+
+/**
+ * 任务列表 + 今天的工作概览。MCP 与 CLI 共用，避免两处返回结构不一致。
+ * session.advice 非空时，专家应主动建议开新对话并帮用户压摘要。
+ */
+export function listWithSession(limit = 20) {
+  const jobs = listJobsTool(limit);
+  let session = null;
+  try {
+    const s = readSessionNotes();
+    session = {
+      day: s.day,
+      count: s.lines.length,
+      recent: s.lines.slice(-8),
+      advice: s.lines.length >= 6
+        ? '今天在这个对话里已经派了 6 单以上，历史越长每轮越贵。建议先把进度压成摘要再开新对话——要我写吗？'
+        : null,
+    };
+  } catch { /* 读不到不影响列任务 */ }
+  return { jobs, session };
 }
 
 /**

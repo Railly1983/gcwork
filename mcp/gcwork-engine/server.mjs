@@ -6,7 +6,7 @@
 // 这是长任务能跑完的唯一可靠办法。
 //
 // 协议要点：逐行 JSON（不是 Content-Length 帧）。宿主健康检查会发 ping，必须回。
-import { dispatch, status, resume, recoverOrphans, listJobsTool } from './src/dispatch.mjs';
+import { dispatch, status, resume, recoverOrphans, listWithSession } from './src/dispatch.mjs';
 import { verify } from './src/verify.mjs';
 import { health } from './src/models.mjs';
 import { TOOLS } from './src/schema.mjs';
@@ -86,7 +86,7 @@ const handlers = {
     return health();
   },
   async list_jobs(args = {}) {
-    return { jobs: listJobsTool(args.limit || 20) };
+    return listWithSession(args.limit || 20);
   },
 };
 

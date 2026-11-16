@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { ensureAppServer, startThread, startTurn, subscribe, interruptTurn } from './appserver.mjs';
-import { getJob, putJob } from './ledger.mjs';
+import { getJob, putJob, appendSessionNote } from './ledger.mjs';
 import { gitSnapshot, gitDelta, snapshotFromJSON, gitDiffText } from './git.mjs';
 import { classifyError } from './errors.mjs';
 import { releaseLock } from './locks.mjs';
@@ -308,11 +308,13 @@ function finish(spec, route, runDir) {
   if (diff) writeFileSync(join(runDir, 'diff.txt'), `${diff}\n`, 'utf8');
 
   const endedAt = new Date().toISOString();
+  const finalSummary = truncate(message ? (message.split(/\r?\n/).find((l) => l.trim()) || '(空行)') : status, 500);
   putJob({
     ...job,
     status,
-    summary: truncate(message ? (message.split(/\r?\n/).find((l) => l.trim()) || '(空行)') : status, 500),
-    partialOutput: truncate(message || route.error || '（无输出）', 4000),
+    summary: finalSummary,
+    // 成功时回显开头，失败时保留诊断篇幅；全文在 message.md
+    partialOutput: truncate(message || route.error || '（无输出）', status === 'ok' ? 800 : 3000),
     changed_files: changedFiles,
     changed_stats: delta ? delta.stats : null,
     headMoved,
@@ -339,6 +341,11 @@ function finish(spec, route, runDir) {
       result_path: join(runDir, 'result.json'),
     },
   });
+
+  // 收尾也落一行会话日志：下个会话看到结果与失败原因，就知道该不该续跑
+  appendSessionNote(
+    `${jobId} · ${status}${finalSummary && finalSummary !== status ? `（${truncate(finalSummary, 60)}）` : ''}`,
+  );
 
   releaseLock(job.lockPath, jobId);
 }

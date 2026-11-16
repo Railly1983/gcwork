@@ -16,7 +16,7 @@
 //   node cli.mjs list    [--limit 20]
 //
 // 所有命令输出 JSON（便于模型直接读），失败时 exit code 非 0。
-import { dispatch, status, resume, listJobsTool, recoverOrphans } from './src/dispatch.mjs';
+import { dispatch, status, resume, listWithSession, recoverOrphans } from './src/dispatch.mjs';
 import { verify } from './src/verify.mjs';
 import { health } from './src/models.mjs';
 import { runJob } from './src/engine/worker.mjs';
@@ -70,7 +70,7 @@ async function main() {
   }
 
   if (cmd === 'list') {
-    process.stdout.write(`${JSON.stringify(listJobsTool(num(a.limit) || 20), null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(listWithSession(num(a.limit) || 20), null, 2)}\n`);
     return 0;
   }
 
