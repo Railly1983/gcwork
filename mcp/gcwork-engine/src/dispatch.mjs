@@ -16,9 +16,11 @@ import { readResult as claudeRead } from './adapters/claude.mjs';
 
 const DEFAULT_TIMEOUT_SEC = 1800; // 30 分钟安全上限，远高于宿主轮次上限
 const MAX_PROMPT = 200_000; // 简报上限保护
-// 输出截断上限。工具返回的每个字都会进会话上下文，长会话里被反复重放；
-// 完整内容始终在 runDir 的 message.md，需要时再单独读。
-const MAX_PARTIAL = 1500;
+// 输出分层：成功时只回显开头一段（判断有没有跑偏），失败时保留更多（要诊断原因）。
+// 完整原文始终完整落在 runDir/message.md，通过 artifacts.message_path 随时可读，
+// 所以这里不是「截断丢信息」，而是「默认不把全文塞进上下文」。
+const PARTIAL_OK = 800;
+const PARTIAL_FAIL = 3000;
 const MAX_PROGRESS_ITEMS = 40; // 进度里保留的最近条目数
 import { HEARTBEAT_STALE_MS } from './engine/locks.mjs'; // 与锁判活共用同一阈值，避免两处不一致
 
@@ -47,7 +49,7 @@ function newJobId(modelName = null) {
 function truncate(s, max) {
   const t = String(s || '');
   if (t.length <= max) return t;
-  return `${t.slice(0, Math.floor(max * 0.8))}\n…[已截断，原文 ${t.length} 字符，完整内容见 artifacts.message_path]…`;
+  return `${t.slice(0, Math.floor(max * 0.9))}\n\n…[此处只回显开头，完整内容 ${t.length} 字符，见 artifacts.message_path]`;
 }
 
 // ---------------------------------------------------------------- 校验
@@ -301,7 +303,7 @@ export function finalize(job) {
   // partialOutput：失败也非空，给专家/用户续跑的抓手
   let partialOutput = hasMessage ? message : '';
   if (!partialOutput) {
-    partialOutput = (cliError || '').trim() || truncate(stdout, MAX_PARTIAL);
+    partialOutput = (cliError || '').trim() || stdout;
   }
   if (!partialOutput) partialOutput = '（无输出）';
 
@@ -331,7 +333,8 @@ export function finalize(job) {
     ...job,
     status,
     summary: truncate(summary, 500),
-    partialOutput: truncate(partialOutput, MAX_PARTIAL),
+    // 成功时给开头一段，失败时给足够诊断的篇幅；全文在 message_path
+    partialOutput: truncate(partialOutput, status === 'ok' ? PARTIAL_OK : PARTIAL_FAIL),
     changed_files: changedFiles,
     changed_stats: changedStats,
     headMoved,
