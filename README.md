@@ -53,19 +53,6 @@ node server.mjs        # 作为 MCP server 启动（stdio）
 
 放好后重开一个会话，在「专家 → 我的专家」里就能看到「吉克搬砖」。
 
-## 装完先跑一次 install.mjs
-
-```bash
-cd ~/.workbuddy/plugins/marketplaces/my-experts/plugins/gcwork
-node install.mjs
-```
-
-**为什么必须跑**：WorkBuddy 把插件的 `.mcp.json` 复制成「自定义连接器」，而这条通道**不展开 `${CODEBUDDY_PLUGIN_ROOT}`** ——变量会原样留在配置里，启动时找不到可执行文件，报 `Connection closed`（connectMs 只有几毫秒）。
-
-`install.mjs` 把这个变量换成你这台机器的真实路径，同时更新缓存目录和用户 `mcp.json`。幂等，重复跑没关系。
-
-先跑脚本，再看下面的连接步骤。
-
 ## 连上 MCP（必须做一次）
 
 专家本身只是提示词，真正干活的是 `gcwork-engine` 这个 MCP 服务。**没连上它，专家就没有任何工具可用**，只会变成一份说明书。
@@ -79,9 +66,14 @@ node install.mjs
 排查要点：
 
 - 状态一直连不上，点卡片上的「复制日志」看具体报错
-- 报 `spawn ...node.exe ENOENT`：说明 `command` 指向的 node 路径不对。本服务的启动脚本 `bin/run-node` 会自己按 `WORKBUDDY_EXTRA_PATHS` 找宿主 Node，不需要你配 PATH
-- 报 `Connection closed` 且 connectMs 只有几毫秒：九成是路径没展开。跑一次 `node install.mjs` 就能修好
-- 想手动改也可以：把 `command` 和 `args` 里的 `${CODEBUDDY_PLUGIN_ROOT}` 换成你的实际安装路径
+- 包内 `.mcp.json` 用的是官方写法（`command: "node"` + `args: ["./mcp/gcwork-engine/server.mjs"]`），宿主会自己把 `node` 换成本机内置的 Node、把 `./` 解析成插件根的绝对路径。**不要改成绝对路径，也不要在 `command` 里写变量**——宿主只解析 `args` 里的 `./`，`command` 不做任何替换
+- 报 `Connection closed` 且 connectMs 只有几毫秒：进程根本没起来，先确认解压后 `mcp/gcwork-engine/server.mjs` 在包里
+- 本机直接验证服务能起：
+
+  ```bash
+  echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+    | node mcp/gcwork-engine/server.mjs
+  ```
 
 ## 成本
 

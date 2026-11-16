@@ -7,10 +7,16 @@
 ### MCP 一直连不上的真正原因（三个叠加）
 
 1. **声明了 `dependencies.mcpServers`**。声明后平台把自带 MCP 当成「需要用户手动连接的外部依赖」，弹引导卡片并一直 pending，永远不会自动启动。官方文档写明：不声明时才会自动读包根 `.mcp.json`。这是主因，已删除该字段。
-2. **`command` 写成裸 `node`**。WorkBuddy 不把自带 Node 放到 PATH，而是通过 `WORKBUDDY_EXTRA_PATHS` 导出所在目录，裸 `node` 找不到。改为官方内置插件的做法：`command: "${CODEBUDDY_PLUGIN_ROOT}/bin/run-node"`。
+2. **`command` 里放了 `${CODEBUDDY_PLUGIN_ROOT}`**。宿主对 `command` 不做任何变量替换，`${...}` 原样传给 spawn，路径不存在，进程起不来——报 `Connection closed`、connectMs 只有个位数毫秒。
 3. **多写了 `cwd`**。cwd 指向不存在的路径时 Windows 上 spawn 报 `ENOENT`，看起来像 node.exe 缺失，把排查方向带偏很久。已删除。
 
-`bin/run-node` 在 POSIX 上从 `WORKBUDDY_EXTRA_PATHS`（冒号分隔）找 `node`，Windows 的 `run-node.cmd` 用分号分隔找 `node.exe`，再退回 PATH，都没有才报 127。脚本必须全 ASCII——Windows 命令行按系统 ANSI 码页解析批处理，中文注释会变成垃圾命令；`bin/run-node` 必须 LF 行尾，否则 macOS/Linux 报 `bad interpreter`，用 `.gitattributes` 锁死。
+正确写法（依据宿主实现，不是照文档抄的）：
+
+```json
+{"mcpServers":{"gcwork-engine":{"command":"node","args":["./mcp/gcwork-engine/server.mjs"]}}}
+```
+
+宿主 `resolveStdioRuntimeCommand()` 特判裸名 `node` / `node.exe`，换成本机自带的 Node 绝对路径；`resolveExpertMcpLaunchConfig()` 只处理 `args`，把以 `./` 开头的元素按插件根解析成绝对路径；`command` 字段不做任何替换。所以 `command` 只写裸名，插件内路径放 `args` 的 `./` 形式，两边都不写绝对路径。
 
 ### 超时问题
 
@@ -31,7 +37,8 @@ MCP 进程由宿主常驻，任务跑在进程内，因此不受 Bash 工具单�
 
 ### 变化
 
-- 新增 `bin/run-node` 与 `bin/run-node.cmd`：解析宿主 Node 并启动 MCP。
+- 删除 `bin/run-node`、`bin/run-node.cmd`、`install.mjs`：`.mcp.json` 用官方写法后不再需要任何启动脚本或安装后处理，装完只需在连接器里点一次重连。
+
 - 新增 `src/engine/appserver.mjs`：常驻连接、thread/turn、通知流、断线检测。
 - 新增 `src/engine/worker.mjs`：`runJob()` 跑完一单。
 - 新增 `src/engine/locks.mjs`：写锁独立，两处共用。

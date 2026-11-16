@@ -29,7 +29,6 @@
 agents/gcwork.md          薄专家：人设 + 自检 + 派单 + 汇报。不含契约
 .codebuddy-plugin/plugin.json  专家清单
 .mcp.json                 插件自带 MCP（自动加载）
-bin/run-node(.cmd)        解析宿主 Node 并启动 MCP
 mcp/gcwork-engine/
   server.mjs              MCP stdio 服务端（逐行 JSON-RPC）
   cli.mjs                 命令行入口（排查/测试用，不进分发包）
@@ -54,34 +53,25 @@ mcp/gcwork-engine/
 
 正确做法：只放包根 `.mcp.json`，不声明 dependencies，平台会自动加载。
 
-### 2. `command` 必须指向 `bin/run-node`
+### 2. `.mcp.json` 的写法：`command` 用裸名 `node`，路径放 `args` 的 `./`
 
-不能写裸 `node`：WorkBuddy 不把自带 Node 放 PATH，而是通过 `WORKBUDDY_EXTRA_PATHS`（分号分隔）导出目录。`bin/run-node.cmd` 按这个变量找 node.exe，再退回 PATH。
+```json
+{"mcpServers":{"gcwork-engine":{"command":"node","args":["./mcp/gcwork-engine/server.mjs"]}}}
+```
 
-**`run-node.cmd` 必须全 ASCII**——Windows 按系统 ANSI 码页解析批处理，中文注释会变成垃圾命令。
+依据是宿主 `app.asar` 的实际实现（2026-11-16 从代码读出，不是照文档抄的）：
 
-**`bin/run-node` 必须 LF 行尾**，否则 macOS/Linux 报 `bad interpreter: ^M`。已用 `.gitattributes` 锁死。
+- `resolveStdioRuntimeCommand(cmd)`：`cmd` 是裸名 `node` / `node.exe` 时，换成本机自带的 Node 绝对路径；其他值原样返回。所以 `command: "node"` 跨机器、跨 Node 版本都安全。
+- `resolveExpertMcpLaunchConfig(cfg, pluginDir)`：只处理 `args`，把以 `./` 开头的元素按插件根解析成绝对路径。
+- **`command` 字段不做任何变量替换**，`${...}` 会原样传给 spawn。
+
+所以：`command` 只放裸名或系统能找到的可执行文件，插件内路径一律放 `args` 的 `./` 形式。**两边都不要写绝对路径，也不要写变量。**
+
+曾经踩过的坑：把 `${CODEBUDDY_PLUGIN_ROOT}` 放进 `command`，它不被替换，spawn 找不到文件，3 毫秒就报 `Connection closed`——看起来像「宿主不支持变量」，实际是「这个字段根本不处理变量」。`bin/run-node`、`install.mjs` 都是当时基于误判加的补丁，2.2.0 已删除。
 
 ### 3. 不要写 `cwd`
 
-`cwd` 指向不存在的路径时，Windows spawn 报的是 `ENOENT`，看起来像 node.exe 缺失，极容易误判。
-
-### 4. 宿主不展开 `${CODEBUDDY_PLUGIN_ROOT}`（已实测确认，不是猜的）
-
-**证据**（2026-11-16 09:13 实测）：把插件配置改回变量写法、并删掉用户 `mcp.json` 里的残留条目后重连，日志显示
-
-```
-id=custom-mcp:gcwork-engine state=error error=MCP error -32000: Connection closed
-connectMs=3 totalMs=4
-```
-
-3 毫秒就失败 = 进程根本没起来 = 变量是字面量、路径不存在。删掉用户条目后平台仍从插件 `.mcp.json` 生成 `custom-mcp`，说明**这就是第三方插件的通道，且该通道不展开变量**。内置插件（weixinpay）走另一条通道，所以它们用变量没问题。
-
-**结论**：`.mcp.json` 必须写绝对路径。
-
-**分发方案**：包根提供 `install.mjs`，用户装完跑一次，自动把变量换成真实路径（同时更新插件目录、缓存目录、用户 `mcp.json`）。README 已写清这一步。
-
-同步脚本必须带 `/XF .mcp.json`，否则会覆盖掉本机的绝对路径版。
+`cwd` 指向不存在的路径时，Windows spawn 报的是 `ENOENT`，看起来像 node.exe 缺失，极容易误判。省略 `cwd` 时宿主用插件根作为工作目录，正好是我们要的。
 
 ### 5. 任务跑在常驻 MCP 进程内
 
@@ -151,7 +141,6 @@ connectMs=3 totalMs=4
 
 ### 跨平台（Windows 特有）
 21. `spawnSync('npm')` 直接 `ENOENT`（npm 是 `.cmd`，Node 18.20+ 禁止无 shell 启动批处理）→ 改走 `node npm-cli.js`
-22. `run-node.cmd` 中文注释变垃圾命令；`bin/run-node` 被 git 转 CRLF
 
 ## 已删除的东西（别加回来）
 
@@ -168,7 +157,6 @@ connectMs=3 totalMs=4
 1. **codex 服务端故障**：`workspace routing discovery failed`，11-16 08:35 时仍不可用。这是 codex 侧问题，非本项目。
 2. **错误分类不全**：`workspace routing failed` 被判成 `failed` 而不是明确类型，`switchRequiresConsent` 不触发。
 3. **换模型需同意**只覆盖 `quota_exhausted`，「执行器不可用」也该覆盖。
-4. **`.mcp.json` 绝对路径是本机 workaround**，根治要平台修变量展开，或插件走正式安装流程。
 5. 测试没覆盖 MCP 并发路径（现有用例主要是单元级）。
 
 ## 常用命令
@@ -197,7 +185,7 @@ robocopy ... /MIR /XD .git /XF .mcp.json
 1. 单测 + selfcheck 全绿
 2. 子代理独立审查通过（结论必须是「可以发版」）
 3. `git archive` 打包，剔除 tests 和 .gitignore
-4. 校验包内：含 `bin/run-node`、`cli.mjs`、`server.mjs`；不含 `server.mjs` 以外的 MCP 配置残留
+4. 校验包内：含 `cli.mjs`、`server.mjs`、`.mcp.json`（`command: "node"` + `args: ["./mcp/gcwork-engine/server.mjs"]`）；不含 `install.mjs` 与 `bin/run-node*`
 5. **老大点头后**才推送 / 发 Release / 提审
 
 ## 教训

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // gcwork 命令行入口。
 //
-// 为什么不用 MCP：插件装在用户机器上时，宿主不替换 ${CODEBUDDY_PLUGIN_ROOT}，
+// 为什么不用 MCP：命令行只做排查与测试，正常调用走 MCP 工具。
 // cwd 变成字面量路径，spawn 直接 ENOENT，连接器永远连不上。
 // 改用 Bash 直接调这个 CLI，不依赖任何宿主配置，也不会因为连不上而失效。
 //
