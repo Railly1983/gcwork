@@ -1,20 +1,21 @@
 {
   "mcpServers": {
-    "gcwork": {
+    "codex-dispatch": {
       "type": "stdio",
       "command": "node",
       "args": [
-        "./mcp/gcwork/server.mjs"
+        "./mcp/codex-dispatch/server.mjs"
       ],
       "x-workbuddy": {
         "displayName": {
-          "zh": "本机 Codex",
-          "en": "Local Codex"
+          "zh": "Codex 派单",
+          "en": "Codex Dispatch"
         },
         "description": {
-          "zh": "把任务派给本机已登录的 Codex，同步等结果。改动以 git 实测为准，中断可续做。",
-          "en": "Dispatch tasks to your local Codex and wait for results. Changes verified by git; interrupted tasks can resume."
-        }
+          "zh": "把任务交给本机 Codex 执行，同步等结果。改了哪些文件以 git 实测为准，中途断了可以接着做。",
+          "en": "Hand tasks to your local Codex and wait for the result. File changes are verified by git; interrupted tasks pick up where they left off."
+        },
+        "icon": "./assets/icon.svg"
       }
     }
   }

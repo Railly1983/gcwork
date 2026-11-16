@@ -1,6 +1,6 @@
-# gcwork
+# codex-dispatch / Codex 派单
 
-把任务派给本机已登录的 Codex，同步等结果。
+把任务交给本机已登录的 Codex 执行，同步等结果。
 
 一个连接器，两个工具。没有专家层，没有技能，没有独立的任务调度系统。
 
@@ -19,7 +19,7 @@ npm i -g @openai/codex
 codex login
 ```
 
-然后在连接器里启用 `gcwork`。启用后能调到 `dispatch` 就说明通了。
+然后在连接器里启用 `Codex 派单`。启用后能调到 `dispatch` 就说明通了。
 
 ## 用法
 
@@ -84,6 +84,8 @@ prompt     续做时的补充要求，可选
 
 **同一个 thread 只能有一个 writer。** 旧连接没断开就去 resume 会报 `already has an active writer`。服务内部会先关连接再恢复；如果你同时开了两个 WorkBuddy 窗口对同一目录派单，第二个会明确报这个错。
 
+**同一目录同时只跑一个写任务。** 两个任务同时改同一批文件会互相覆盖，而且两边都报成功，看不出问题。所以派单前会按工作目录加锁，第二个任务直接拒绝并说明谁占着、跑了多久。只读任务不占锁。要真并行，用独立目录或 git worktree。
+
 **非 git 目录能力受限。** 没有 git 就没有行数统计，也没有回滚保障，只能按文件修改时间和大小判断有没有被改过。返回里会明确写出来。
 
 **app-server 是官方标注给开发调试用的。** 接口可能变。所有 JSON-RPC 通信都收在 `appserver.mjs` 一个文件里，协议变了只改那一处。
@@ -91,15 +93,18 @@ prompt     续做时的补充要求，可选
 ## 结构
 
 ```
-mcp/gcwork/
+mcp/codex-dispatch/
   server.mjs       MCP 协议层，两个工具的定义
   dispatch.mjs     派单编排、续跑判断、结果整理
   appserver.mjs    codex app-server 的 JSON-RPC 连接
   entry.mjs        找 codex 入口
   git.mjs          基线快照与改动识别
+  lock.mjs         目录写锁
 ```
 
-任务记录在 `~/.gcwork/tasks/`，产物在 `~/.gcwork/runs/`。可用 `GCWORK_HOME` 改位置。
+任务记录在 `~/.codex-dispatch/tasks/`，产物在 `~/.codex-dispatch/runs/`。可用 `CODEX_DISPATCH_HOME` 改位置。
+
+锁不在这里：它在系统临时目录（`%TEMP%/codex-dispatch-locks`）。锁必须让所有进程都看见，放进配置目录会因为换了 `CODEX_DISPATCH_HOME` 就互相看不见，等于没有锁。
 
 ## 测试
 
@@ -107,6 +112,6 @@ mcp/gcwork/
 node --test tests/*.test.mjs
 ```
 
-21 项，覆盖基线记录、改动识别（含未跟踪与删除文件、任务前脏文件排除）、软超时转 pending、幂等、失败诊断、中断处理。
+36 项，覆盖基线记录、改动识别（含未跟踪与删除文件、任务前脏文件排除）、软超时转 pending、幂等、失败诊断、中断处理、目录写锁（含跨进程竞争）。
 
 `tests/fixtures/fake-codex.mjs` 是一个可编程的假 app-server，用来注入各种故障，不需要真跑 Codex。

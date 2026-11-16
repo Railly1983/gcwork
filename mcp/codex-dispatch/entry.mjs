@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path';
  * 找不到返回 null，由调用方给出人话提示。
  */
 export function findCodex(env = process.env) {
-  if (env.GCWORK_CODEX_ENTRY && existsSync(env.GCWORK_CODEX_ENTRY)) return env.GCWORK_CODEX_ENTRY;
+  if (env.CODEX_DISPATCH_CODEX_ENTRY && existsSync(env.CODEX_DISPATCH_CODEX_ENTRY)) return env.CODEX_DISPATCH_CODEX_ENTRY;
 
   const rel = join('node_modules', '@openai', 'codex', 'bin', 'codex.js');
   const cands = [join(dirname(process.execPath), rel)];

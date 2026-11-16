@@ -1,19 +1,19 @@
-# gcwork 交接文档
+# codex-dispatch / Codex 派单 交接文档
 
 > 读这份文档加读代码，可以接手这个项目，不需要对话历史。
 > 最后更新：3.0.0
 
 ## 一句话是什么
 
-把任务派给本机 Codex 的 WorkBuddy 连接器。纯 MCP，一个工具派单、一个工具续跑。
+把任务交给本机 Codex 的 WorkBuddy 连接器。纯 MCP，一个工具派单、一个工具续跑。
 
 ## 当前状态
 
 | 项 | 值 |
 | --- | --- |
 | 版本 | 3.0.0 |
-| 单测 | 22/22（`node --test tests/*.test.mjs`） |
-| 真机验证 | 派单、软超时转 pending、跨进程续做、已完成结果取回，四项均过 |
+| 单测 | 36/36（`node --test tests/*.test.mjs`） |
+| 真机验证 | 派单、软超时转 pending、跨进程续做、已完成结果取回、跨进程抢锁，五项均过 |
 | 发布 | 未发布。2.2.0 仍在平台审核中，是否覆盖待定 |
 
 ## 形态选择的依据
@@ -31,15 +31,17 @@
 ## 代码结构
 
 ```
-mcp/gcwork/
+mcp/codex-dispatch/
   server.mjs      MCP 协议层。两个工具的定义全在这里，包括给模型的引导。
   dispatch.mjs    派单编排、续跑判断、回执整理、产物落盘。
+  lock.mjs        目录写锁。
   appserver.mjs   codex app-server 的 JSON-RPC 连接。协议改动只需改这里。
   entry.mjs       找 codex 入口。
   git.mjs         基线快照、改动识别。
 tests/
   git.test.mjs        基线、改动识别、脏文件排除、删除文件
-  resume.test.mjs     派单、pending、幂等、失败诊断、中断、清理
+  resume.test.mjs     派单、pending、幂等、失败诊断、中断、清理、写锁行为
+  lock.test.mjs       抢锁/放锁、路径归一、僵尸锁回收、跨进程竞争
   fixtures/fake-codex.mjs  可编程假 app-server，注入各种故障
 ```
 
@@ -78,9 +80,9 @@ tests/
 - 只支持 codex。Claude 的适配器随 3.0 一起删了，要加回来需要自己写一个 `thread/resume` 的等价机制，Claude 侧没有 app-server。
 - app-server 是官方标注给开发调试用的，接口可能变。所有 JSON-RPC 收在 `appserver.mjs`，协议变了只改那一处。
 - 非 git 目录没有行数统计，也没有回滚保障。
-- 同一目录并发写没有锁。两个任务同时改同一批文件会互相覆盖——这是主动去掉写锁的代价，靠用户自己不要同时派。
+- 同一目录只跑一个写任务。锁是按目录加的，第二个写任务直接拒绝；只读任务不占锁。要真并行必须用独立目录或 worktree。
 
 ## 未做但可能需要的
 
 - 进度可视化。`app-server` 有通知流，可以订阅后推给宿主，不需要模型参与。需要宿主支持 MCP 进度通知。
-- 多目录并发写锁。如果实测发现用户经常同时派同一目录，再考虑加回。
+- 等锁而不是拒绝。目前是「被占就明确拒绝」，如果实测发现用户经常撞车，可以改成排队等锁（但会引入等待时长判断，复杂度明显上升）。

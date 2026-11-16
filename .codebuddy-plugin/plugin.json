@@ -1,7 +1,7 @@
 {
-  "name": "gcwork",
+  "name": "codex-dispatch",
   "version": "3.0.0",
-  "description": "Dispatch tasks to your local Codex through its app-server. One connector, two tools, synchronous results with resumable sessions.",
+  "description": "Hand tasks to your local Codex and wait for the result. File changes are verified by git; interrupted tasks pick up where they left off.",
   "author": {
     "name": "Jike",
     "email": "30673448@qq.com"
@@ -10,10 +10,10 @@
   "license": "MIT",
   "keywords": [
     "codex",
-    "local-cli",
+    "openai",
+    "local",
     "coding-agent",
-    "mcp",
-    "app-server"
+    "mcp"
   ],
   "homepage": "https://github.com/Railly1983/gcwork"
 }

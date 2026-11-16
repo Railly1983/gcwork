@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { AppServer } from './appserver.mjs';
 import { findCodex } from './entry.mjs';
 import { baseline, collect } from './git.mjs';
+import { acquire, release, sweepLocks, describeHolder } from './lock.mjs';
 
 // 内存中的活动任务：MCP 进程常驻，跨工具调用共享，这是「同步转 pending」的基础。
 const active = new Map();
@@ -26,12 +27,12 @@ const HOST_HARD_MS = Number(process.env.MCP_TOOL_TIMEOUT) > 0
 const SAFETY_MS = 60_000;
 const DEFAULT_SOFT_MS = 600_000; // 10 分钟
 // 下限：太短会把正常任务频繁打断成 pending。测试需要注入更小的值。
-const MIN_SOFT_MS = Number(process.env.GCWORK_MIN_SOFT_MS) > 0
-  ? Number(process.env.GCWORK_MIN_SOFT_MS)
+const MIN_SOFT_MS = Number(process.env.CODEX_DISPATCH_MIN_SOFT_MS) > 0
+  ? Number(process.env.CODEX_DISPATCH_MIN_SOFT_MS)
   : 5000;
 // 观察僵尸 turn 的窗口：记录说在跑、但长时间没有任何进展，就判定是死进程留下的
-const ZOMBIE_WAIT_MS = Number(process.env.GCWORK_ZOMBIE_MS) > 0
-  ? Number(process.env.GCWORK_ZOMBIE_MS)
+const ZOMBIE_WAIT_MS = Number(process.env.CODEX_DISPATCH_ZOMBIE_MS) > 0
+  ? Number(process.env.CODEX_DISPATCH_ZOMBIE_MS)
   : 60_000;
 
 function softLimitMs(requestedSec) {
@@ -40,11 +41,11 @@ function softLimitMs(requestedSec) {
 }
 
 /**
- * 数据目录。用独立目录而不是复用 2.x 的 ~/.workbuddy/gcwork：
+ * 数据目录。用独立目录而不是复用 2.x 的 ~/.workbuddy/gcwork（2.x 的旧目录）：
  * 两版的记录格式完全不同，混在一起会被当成损坏文件，还可能让旧任务显示成新任务。
  */
 export function homeDir() {
-  return process.env.GCWORK_HOME || join(homedir(), '.gcwork');
+  return process.env.CODEX_DISPATCH_HOME || join(homedir(), '.codex-dispatch');
 }
 function tasksDir() { return join(homeDir(), 'tasks'); }
 function taskFile(ref) { return join(tasksDir(), `${ref}.json`); }
@@ -235,6 +236,22 @@ export async function dispatch(args = {}) {
   const base = baseline(cwd);
   const conn = new AppServer({ entry });
 
+  // 同一目录只允许一个写任务。只读任务不动文件，不需要锁。
+  // 锁在 job.promise 的 finally 里释放：即使工具调用已返回 pending、任务还在后台跑，
+  // 锁也必须一直握着，否则第二个任务会趁这段时间进来改同一批文件。
+  let lockToken = null;
+  if (!args.read_only) {
+    const got = acquire(homeDir(), cwd, { taskRef });
+    if (!got.ok) {
+      return {
+        status: 'rejected',
+        error: `${cwd} 正被另一个任务占用：${describeHolder(got.holder)}。`,
+        hint: '等它结束再派单。要并行就换一个独立目录（例如 git worktree）。',
+      };
+    }
+    lockToken = got.token;
+  }
+
   const rec = {
     taskRef,
     prompt,
@@ -269,6 +286,7 @@ export async function dispatch(args = {}) {
     // thread 是否已建好。只有建好之后，软超时才有意义 ——
     // 否则会返回一个 thread_id=null 的 pending，续跑直接断（实测踩过）。
     ready: false,
+    lockToken, // 交给 shutdown 兜底放锁
   };
 
   job.promise = (async () => {
@@ -315,7 +333,8 @@ export async function dispatch(args = {}) {
       };
     } finally {
       job.done = true;
-      // 连接保持到任务结束；close 放到 continue/退出时做
+      // 锁在这里放，不是工具调用返回时：pending 之后任务还在后台跑，那段必须继续占着。
+      if (lockToken) release(homeDir(), cwd, lockToken);
     }
   })();
 
@@ -412,8 +431,23 @@ export async function continueTask(args = {}) {
     reason: rec.baseReason || null,
   };
 
+  // 续跑也要占目录锁：宿主重启后原锁可能是死进程留下的，acquire 会清掉重抢。
+  // 如果锁还被一个活进程握着，说明别的窗口正在跑同一个目录，这时候续跑只会互相踩。
+  let lockToken = null;
+  if (!rec.readOnly) {
+    const got = acquire(homeDir(), rec.cwd, { taskRef });
+    if (!got.ok) {
+      return {
+        status: 'rejected',
+        error: `${rec.cwd} 正被另一个任务占用：${describeHolder(got.holder)}。`,
+        hint: '等它结束再续跑。',
+      };
+    }
+    lockToken = got.token;
+  }
+
   // continue 的 threadId 已经在盘上，不存在「建不出来」的问题，直接算就绪
-  const job = { rec, conn, done: false, result: null, promise: null, ready: true };
+  const job = { rec, conn, done: false, result: null, promise: null, ready: true, lockToken };
   job.promise = (async () => {
     try {
       await conn.start();
@@ -490,6 +524,7 @@ export async function continueTask(args = {}) {
       };
     } finally {
       job.done = true;
+      if (lockToken) release(homeDir(), rec.cwd, lockToken);
     }
   })();
 
@@ -597,7 +632,10 @@ function writeArtifacts(rec, turnResult, changes) {
  */
 export function sweep() {
   const dir = tasksDir();
-  if (!existsSync(dir)) return { pendingRecovery: 0, pruned: 0 };
+  // 僵尸锁必须先清：上一次进程崩溃留下的锁不清，那个目录以后每次派单都会被拒。
+  let locksCleared = 0;
+  try { locksCleared = sweepLocks(homeDir()); } catch { /* 锁目录不可写不该拦住启动 */ }
+  if (!existsSync(dir)) return { pendingRecovery: 0, pruned: 0, locksCleared };
   let pendingRecovery = 0;
   let pruned = 0;
   const keepMs = 14 * 86400_000;
@@ -618,7 +656,7 @@ export function sweep() {
       }
     } catch { /* 坏文件跳过 */ }
   }
-  return { pendingRecovery, pruned };
+  return { pendingRecovery, pruned, locksCleared };
 }
 
 /** 进程退出时关掉所有连接，不留孤儿 app-server，也不留写到一半的任务。 */
@@ -635,4 +673,11 @@ export async function shutdown() {
     Promise.allSettled(jobs.map((j) => j.promise)),
     new Promise((r) => setTimeout(r, 3000)),
   ]);
+  // 兜底放锁。正常情况下 finally 已经放了；这里处理「任务卡在超时里没走到 finally」
+  // 就被叫停的情况 —— 不放的话那个目录会锁到下一个进程启动才被 sweep 清掉。
+  for (const j of jobs) {
+    if (!j.lockToken) continue;
+    const cwd = j.rec?.cwd;
+    if (cwd) { try { release(homeDir(), cwd, j.lockToken); } catch { /* 忽略 */ } }
+  }
 }

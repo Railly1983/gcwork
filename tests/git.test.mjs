@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { baseline, collect, headCommit } from '../mcp/gcwork/git.mjs';
+import { baseline, collect, headCommit } from '../mcp/codex-dispatch/git.mjs';
 
-const TMP = join(process.env.TEMP || '/tmp', `gcwork-test-git-${process.pid}`);
+const TMP = join(process.env.TEMP || '/tmp', `codex-dispatch-test-git-${process.pid}`);
 
 function freshDir(name) {
   const d = join(TMP, `${name}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`);

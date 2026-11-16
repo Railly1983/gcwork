@@ -7,12 +7,12 @@
 // 6 失败诊断 → 区分失败/中断，给出原因
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const FIX = join(import.meta.dirname, 'fixtures', 'fake-codex.mjs');
-const TMP = join(process.env.TEMP || '/tmp', `gcwork-test-run-${process.pid}`);
+const TMP = join(process.env.TEMP || '/tmp', `codex-dispatch-test-run-${process.pid}`);
 
 let HOME;
 let WS;
@@ -24,8 +24,8 @@ before(() => {
   mkdirSync(HOME, { recursive: true });
   mkdirSync(WS, { recursive: true });
   writeFileSync(join(WS, 'a.txt'), 'one\n', 'utf8');
-  process.env.GCWORK_HOME = HOME;
-  process.env.GCWORK_CODEX_ENTRY = FIX;
+  process.env.CODEX_DISPATCH_HOME = HOME;
+  process.env.CODEX_DISPATCH_CODEX_ENTRY = FIX;
 
 });
 
@@ -38,13 +38,13 @@ function fresh(minSoft = 6000) {
   n += 1;
   // 正常用例给足余量（fake 建 thread ~1s + 一轮对话）；
   // 需要测 pending 的用例传更小的值主动触发。
-  process.env.GCWORK_MIN_SOFT_MS = String(minSoft);
+  process.env.CODEX_DISPATCH_MIN_SOFT_MS = String(minSoft);
   const home = join(HOME, `h${n}`);
   const ws = join(WS, `w${n}`);
   mkdirSync(home, { recursive: true });
   mkdirSync(ws, { recursive: true });
   writeFileSync(join(ws, 'a.txt'), 'one\n', 'utf8');
-  process.env.GCWORK_HOME = home;
+  process.env.CODEX_DISPATCH_HOME = home;
   return { home, ws, state: join(home, 'state.log') };
 }
 
@@ -53,7 +53,7 @@ async function load(mode, state) {
   process.env.FAKE_MODE = mode;
   process.env.FAKE_STATE = state || '';
   // Windows 下动态 import 必须是 file:// URL，直接给盘符路径会被 ESM 拒绝
-  const p = join(import.meta.dirname, '..', 'mcp', 'gcwork', 'dispatch.mjs');
+  const p = join(import.meta.dirname, '..', 'mcp', 'codex-dispatch', 'dispatch.mjs');
   const url = pathToFileURL(p).href;
   return import(`${url}?m=${mode}-${Math.random()}`);
 }
@@ -91,6 +91,54 @@ test('幂等：同 task_ref 重复派单不会重复执行', async () => {
   const log = existsSync(state) ? readFileSync(state, 'utf8') : '';
   const starts = (log.match(/turn slow/g) || []).length;
   assert.equal(starts, 1, `只应执行一次，实际 ${starts} 次`);
+  await d.shutdown();
+});
+
+test('写锁：同目录第二个任务被明确拒绝，不覆盖前一个', async () => {
+  const a = fresh();
+  const d = await load('slow', a.state);
+  // 同一进程内不同目录才能各起一个 dispatch —— 这里要测的是「同目录被挡」，
+  // 所以第二个任务用同样的 cwd、不同的 home（模拟另一个 WorkBuddy 窗口）。
+  const r1 = await d.dispatch({ prompt: '慢任务', cwd: a.ws, timeout_sec: 1, task_ref: 'lock-a' });
+  assert.equal(r1.status, 'pending');
+
+  const b = fresh();
+  // 换 home 但工作目录仍是 a.ws：锁是按目录算的，必须挡住
+  const d2 = await load('complete', b.state);
+  const r2 = await d2.dispatch({ prompt: '抢同一个目录', cwd: a.ws, timeout_sec: 30 });
+  assert.equal(r2.status, 'rejected');
+  assert.match(r2.error, /占用/);
+  assert.match(r2.hint, /换一个独立目录/);
+
+  await d.shutdown();
+  await d2.shutdown();
+});
+
+test('写锁：只读任务不占锁，可以和写任务并行', async () => {
+  const a = fresh();
+  const d = await load('slow', a.state);
+  const r1 = await d.dispatch({ prompt: '慢任务', cwd: a.ws, timeout_sec: 1, task_ref: 'lock-w' });
+  assert.equal(r1.status, 'pending');
+
+  const b = fresh();
+  const d2 = await load('complete', b.state);
+  // read_only 不改文件，不该被写锁挡住
+  const r2 = await d2.dispatch({ prompt: '只看看', cwd: a.ws, timeout_sec: 30, read_only: true });
+  assert.notEqual(r2.status, 'rejected', `只读任务被误挡：${JSON.stringify(r2)}`);
+
+  await d.shutdown();
+  await d2.shutdown();
+});
+
+test('写锁：任务结束即释放，目录不会锁死', async () => {
+  const { ws, state, home } = fresh();
+  const d = await load('complete', state);
+  const r1 = await d.dispatch({ prompt: '改 a.txt', cwd: ws, timeout_sec: 30 });
+  assert.equal(r1.status, 'completed');
+
+  const locks = join(home, 'locks');
+  const left = existsSync(locks) ? readdirSync(locks).filter((f) => f.endsWith('.lock')) : [];
+  assert.deepEqual(left, [], '任务完成后不该留锁');
   await d.shutdown();
 });
 

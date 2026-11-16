@@ -29,7 +29,7 @@ export class AppServer {
     if (this.child && !this.dead) return;
     this.spawnChild();
     await this.request('initialize', {
-      clientInfo: { name: 'gcwork', version: '3.0.0' },
+      clientInfo: { name: 'codex-dispatch', version: '3.0.0' },
       capabilities: {},
     }, READY_TIMEOUT_MS);
     this.notify('initialized', {});
@@ -142,7 +142,7 @@ export class AppServer {
       // 默认拒绝交互式审批：任务全在沙箱内跑，不该有需要人工点确认的操作
       this.send({
         jsonrpc: '2.0', id: msg.id,
-        error: { code: -32601, message: 'gcwork 不支持交互式审批，请用沙箱策略规避' },
+        error: { code: -32601, message: 'codex-dispatch 不支持交互式审批，请用沙箱策略规避' },
       });
       return;
     }

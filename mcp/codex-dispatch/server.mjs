@@ -11,7 +11,7 @@ const TOOLS = [
   {
     name: 'dispatch',
     description: [
-      '把任务派给本机已登录的 Codex，同步等结果。',
+      '把任务交给本机已登录的 Codex 执行，同步等结果。',
       '',
       '返回：status（completed / pending / failed / interrupted）、summary（回答开头 800 字）、',
       'changes（改了哪些文件，从文件系统实测得出，不采信 Codex 自述）、',
@@ -25,6 +25,7 @@ const TOOLS = [
       '- 一单能干完的别拆成多单，每单都有启动开销。',
       '- 任务描述要自足：把背景、路径、验收标准都写进 prompt，Codex 看不到当前对话。',
       '- 默认可写。只有用户明确要求只读时才传 read_only=true。',
+      '- 同一目录同时只跑一个写任务。被拒说明有别的任务在跑，等它结束；要并行就换独立目录。',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -83,7 +84,7 @@ async function handle(msg) {
       result: {
         protocolVersion: PROTOCOL,
         capabilities: { tools: {} },
-        serverInfo: { name: 'gcwork', version: VERSION },
+        serverInfo: { name: 'codex-dispatch', version: VERSION },
       },
     });
     return;
@@ -141,7 +142,7 @@ function onData(chunk) {
     let msg;
     try { msg = JSON.parse(line); } catch { continue; }
     handle(msg).catch((e) => {
-      process.stderr.write(`[gcwork] 处理失败：${(e && e.stack) || e}\n`);
+      process.stderr.write(`[codex-dispatch] 处理失败：${(e && e.stack) || e}\n`);
       if (msg && msg.id !== undefined) {
         send({ jsonrpc: '2.0', id: msg.id, error: { code: -32603, message: String((e && e.message) || e) } });
       }
