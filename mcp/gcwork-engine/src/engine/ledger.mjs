@@ -30,6 +30,11 @@ function ledgerPath(jobId) {
  * 会留下半截 JSON，后续读取失败就会被当成「任务不存在」，进而误判可抢锁。
  */
 export function putJob(job) {
+  // 没有 job_id 就写盘会产生 undefined.json 这种垃圾记录，
+  // 它会永远停在 running，出现在任务列表里误导用户。
+  if (!job || !job.job_id) {
+    throw new Error('putJob 需要 job_id（{...null} 或空对象不得落盘）');
+  }
   ensureDirs();
   const target = ledgerPath(job.job_id);
   const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;

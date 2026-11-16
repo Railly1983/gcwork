@@ -167,6 +167,13 @@ export async function dispatch(taskInput = {}) {
     timeoutSec,
     envMode: task.env || 'inherit',
     blocking: Boolean(task.blocking),
+    // 记下用户显式指定了什么：额度用尽时不允许擅自换执行器/模型，
+    // 这个标记让返回值能明确提醒调用方先征求同意。
+    userSpecified: {
+      executor: Boolean(task.executor && task.executor !== 'auto'),
+      model: Boolean(task.model),
+      effort: Boolean(task.effort),
+    },
     billingWarning: billingWarningFor(target.cli),
     before_snapshot: snapshotToJSON(before),
     git_warning: gitRepo ? null : '非 git 仓库：没有改动证据，也没有回滚保障',
@@ -386,6 +393,8 @@ export function status(ref) {
 }
 
 export function listJobsTool(limit = 20) {
+  // 先收尾再列：否则已经死掉的任务会一直显示 running，看着像挂了几个小时。
+  try { recoverOrphans(); } catch { /* 收尾失败也要能列出 */ }
   return listJobs(limit);
 }
 
@@ -449,6 +458,15 @@ export function recoverOrphans() {
     const j = getJob(id);
     if (!j || j.status !== 'running') continue;
     // worker 已消失但仍记着 running：收尾成明确状态，避免永远挂在那里
+    // 没有 startedAt 的记录（历史垃圾数据）收不了尾，直接判 crashed，
+    // 否则它会永远显示 running。
+    if (!j.startedAt) {
+      try {
+        putJob({ ...j, status: 'crashed', summary: '台账记录缺少 startedAt，无法判定执行状态', endedAt: new Date().toISOString() });
+        recovered += 1;
+      } catch { /* 落盘失败就算了 */ }
+      continue;
+    }
     const hbAge = j.heartbeatAt ? Date.now() - Date.parse(j.heartbeatAt) : Infinity;
     if (hbAge > HEARTBEAT_STALE_MS) {
       const before = j.status;
@@ -460,6 +478,21 @@ export function recoverOrphans() {
 }
 
 // ---------------------------------------------------------------- 契约输出
+
+/**
+ * 额度用尽时，如果用户本来就指定了执行器/模型/强度，换任何一项都要先问。
+ * 返回一句人话提示，调用方看到就该停下来征询，而不是自己换条路重试。
+ */
+function switchNote(job) {
+  if (!job || job.status !== 'quota_exhausted') return null;
+  const spec = job.userSpecified || {};
+  const picked = [];
+  if (spec.executor) picked.push('执行器');
+  if (spec.model) picked.push('模型');
+  if (spec.effort) picked.push('强度');
+  if (!picked.length) return null;
+  return `用户已指定${picked.join('、')}，额度用尽时不要自行换执行器或模型重试，先问用户是否同意更换。`;
+}
 
 export function toContract(job) {
   if (!job) return { status: 'rejected', error: 'NO_JOB' };
@@ -494,6 +527,7 @@ export function toContract(job) {
     partialOutput: job.partialOutput || null,
     claims: [], // 引擎不采信 CLI 自报，验收只看 artifacts
     resumeAfter: job.resumeAfter || null,
+    switchRequiresConsent: switchNote(job),
     degraded: job.degraded || null,
     billingWarning: job.billingWarning || null,
     gitWarning: job.git_warning || null,
