@@ -66,11 +66,22 @@ mcp/gcwork-engine/
 
 `cwd` 指向不存在的路径时，Windows spawn 报的是 `ENOENT`，看起来像 node.exe 缺失，极容易误判。
 
-### 4. 宿主不展开 `${CODEBUDDY_PLUGIN_ROOT}`（本机现状）
+### 4. 宿主不展开 `${CODEBUDDY_PLUGIN_ROOT}`（已实测确认，不是猜的）
 
-插件 MCP 被落地到用户 `~/.workbuddy/mcp.json` 时变量原样保留，导致路径不存在。**本机 workaround**：把安装目录和 cache 目录的 `.mcp.json` 改成绝对路径（仓库里保留变量版，供分发）。
+**证据**（2026-11-16 09:13 实测）：把插件配置改回变量写法、并删掉用户 `mcp.json` 里的残留条目后重连，日志显示
 
-同步脚本必须带 `/XF .mcp.json`，否则会覆盖掉绝对路径版。
+```
+id=custom-mcp:gcwork-engine state=error error=MCP error -32000: Connection closed
+connectMs=3 totalMs=4
+```
+
+3 毫秒就失败 = 进程根本没起来 = 变量是字面量、路径不存在。删掉用户条目后平台仍从插件 `.mcp.json` 生成 `custom-mcp`，说明**这就是第三方插件的通道，且该通道不展开变量**。内置插件（weixinpay）走另一条通道，所以它们用变量没问题。
+
+**结论**：`.mcp.json` 必须写绝对路径。
+
+**分发方案**：包根提供 `install.mjs`，用户装完跑一次，自动把变量换成真实路径（同时更新插件目录、缓存目录、用户 `mcp.json`）。README 已写清这一步。
+
+同步脚本必须带 `/XF .mcp.json`，否则会覆盖掉本机的绝对路径版。
 
 ### 5. 任务跑在常驻 MCP 进程内
 
