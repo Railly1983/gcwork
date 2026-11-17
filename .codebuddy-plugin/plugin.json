@@ -1,5 +1,5 @@
 {
-  "name": "codex-dispatch",
+  "name": "gcwork",
   "version": "3.1.0",
   "description": "Run tasks with your local Codex from WorkBuddy. Pick the model and reasoning effort; interrupted tasks can be resumed.",
   "author": {
@@ -38,7 +38,7 @@
     "zh": "查一下 Codex 能不能用，现在有哪些模型，各自支持什么思考强度。",
     "en": "Check whether Codex is ready, which models I can use, and what reasoning effort each supports."
   },
-  "plugin": "codex-dispatch",
+  "plugin": "gcwork",
   "tags": [
     {
       "en": "Codex",
