@@ -6,6 +6,24 @@
     "name": "Jike",
     "email": "30673448@qq.com"
   },
+  "agents": [
+    "./agents/codex-dispatch.md"
+  ],
+  "expertType": "agent",
+  "agentName": "codex-dispatch",
+  "displayName": {
+    "en": "Codex Dispatch",
+    "zh": "Codex 派单"
+  },
+  "profession": {
+    "en": "Local Codex Dispatch Specialist",
+    "zh": "Codex 任务派发专家"
+  },
+  "displayDescription": {
+    "en": "Hand tasks to your local Codex from WorkBuddy. Pick the model and reasoning effort; interrupted tasks can be resumed.",
+    "zh": "在 WorkBuddy 中调用本机 Codex 执行任务，可指定模型和思考强度，中断可续。"
+  },
+  "avatar": "avatars/expert.png",
   "categoryId": "02-Engineering",
   "license": "MIT",
   "keywords": [
@@ -15,7 +33,31 @@
     "coding-agent",
     "mcp"
   ],
+  "homepage": "https://github.com/Railly1983/codex-dispatch",
+  "defaultInitPrompt": {
+    "zh": "查一下 Codex 能不能用，现在有哪些模型，各自支持什么思考强度。",
+    "en": "Check whether Codex is ready, which models I can use, and what reasoning effort each supports."
+  },
+  "plugin": "codex-dispatch",
+  "tags": [
+    {
+      "en": "Codex",
+      "zh": "Codex"
+    },
+    {
+      "en": "Local CLI",
+      "zh": "本机命令行"
+    },
+    {
+      "en": "Task dispatch",
+      "zh": "任务派发"
+    }
+  ],
   "quickPrompts": [
+    {
+      "zh": "查一下 Codex 能不能用，现在有哪些模型，各自支持什么思考强度。",
+      "en": "Check whether Codex is ready, which models I can use, and what reasoning effort each supports."
+    },
     {
       "zh": "用 Codex 把 src 里的 TODO 全部实现掉，改完跑一遍测试。",
       "en": "Use Codex to implement every TODO under src, then run the tests."
@@ -23,11 +65,6 @@
     {
       "zh": "用 Codex 只读审查这个项目，不要改文件，模型用 gpt-6.1-sol，思考强度 high。",
       "en": "Have Codex review this project read-only without touching files, using gpt-6.1-sol at high reasoning effort."
-    },
-    {
-      "zh": "查一下 Codex 能不能用，现在有哪些模型，各自支持什么思考强度。",
-      "en": "Check whether Codex is ready, which models I can use, and what reasoning effort each supports."
     }
-  ],
-  "homepage": "https://github.com/Railly1983/codex-dispatch"
+  ]
 }

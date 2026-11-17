@@ -1,5 +1,13 @@
 # 修订记录
 
+## 3.1.0 — 2026-11-17
+
+**上架形态改成纯 MCP 插件加一个引导文件。** 平台只收专家，且沙箱评测要求资产能被直接调用；之前的纯 MCP 包没有 `agents` 字段，进不了评测。现在补一个不到 2KB 的 `agents/codex-dispatch.md`，只写「什么时候派单、怎么念回执、连不上时怎么让用户操作」，业务逻辑一行没搬进专家层。
+
+**配套补齐平台必填项。** `expertType`、`agentName`、`displayName`、`profession`、`avatar`、`defaultInitPrompt`、`plugin`、`tags`。头像按规范出 512×512 PNG，由 `assets/icon.svg` 同一套几何绘制，蓝底白 `>_`。
+
+**自查 26 项全过。** 含简介字数（45 字，平台上限 50）、`tags` 恰好 3 个（上次被这个卡过）、`quickPrompts` 中英齐全且首条等于 `defaultInitPrompt`、`command` 用裸名 `node`、`args` 用 `./` 相对路径、不写 `cwd`、不声明 `dependencies`。
+
 ## 3.1.0 — 2026-11-16
 
 **新增 `status` 工具。** 查本机 Codex 装没装、登录没登录、什么套餐、有哪些模型、每个模型支持哪些思考强度、能不能联网搜索与生图。不建会话、不改文件、不占锁、不花额度，几秒返回，一分钟内重复查走缓存。
